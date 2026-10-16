@@ -3,5 +3,6 @@ name = "parallel-computation-demo"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
+    "mlx>=0.32.4",
     "numpy>=2.5.4",
 ]

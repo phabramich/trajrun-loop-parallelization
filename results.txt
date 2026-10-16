@@ -61,3 +61,16 @@ order-3         4      1.55      2.55     2.6x
 order-3         8      1.81      2.81     2.8x
 order-5         4      3.66      4.66     4.7x
 order-5         8      6.02      7.02     7.0x
+case           dev      method  sweeps   wall s     max|Δ|  note
+tanh d=8       cpu64    jacobi      30    0.006   9.42e-05  
+tanh d=8       cpu64    newton       4    0.133   2.74e-06  
+tanh d=8       metal32  jacobi      30    0.014   9.42e-05  
+tanh d=8       metal32  newton       4    0.039   2.58e-06  
+tanh d=128     cpu64    jacobi      27    0.063   8.50e-05  
+tanh d=128     cpu64    newton       3   26.235   3.05e-05  
+tanh d=128     metal32  jacobi      27    0.035   8.49e-05  
+tanh d=128     metal32  newton       3    0.399   3.06e-05  
+linear d=96    cpu64    jacobi      96    0.034   2.13e-04  
+linear d=96    cpu64    newton       1    1.742   4.88e-15  
+linear d=96    metal32  jacobi      96    0.071   2.13e-04  
+linear d=96    metal32  newton       1    0.045   2.01e-06  
