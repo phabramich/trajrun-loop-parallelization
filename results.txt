@@ -74,3 +74,37 @@ linear d=96    cpu64    jacobi      96    0.034   2.13e-04
 linear d=96    cpu64    newton       1    1.742   4.88e-15  
 linear d=96    metal32  jacobi      96    0.071   2.13e-04  
 linear d=96    metal32  newton       1    0.045   2.01e-06  
+
+=== wasm -> batched-VM -> Jacobi-trajectory (2026) =====================
+Pipeline: rustc --target wasm32-unknown-unknown -> wasm_load.py (restricted
+decoder, ~30 opcodes) -> vm_ref.py (scalar interpreter) -> vm_metal.py
+(batched lanes: pc+locals+stack, MLX/Metal или np_shim) -> vm_exec.py
+(chunked Jacobi over instruction boundaries, probe2 guesser).
+
+Programs (wasm-progs/src/lib.rs):
+  fsm_lex       -- quote/escape FSM, hard reset on \n (merge point)
+  sat_acc       -- acc = clamp(acc+x, +-1e6) (clamp attractor)
+  adpcm_decode  -- IMA ADPCM: carried (predictor, step-index)  [WALL]
+  hash_chain    -- FNV-like multiplicative chain               [WALL]
+
+Results (NumPy backend, B=chunks, K = multiple of loop period):
+  csv 32KB fsm_lex : 1,900,557 steps, 513 chunks,   3 sweeps
+                     crit-path 11,136 = T/170, exact 514/514, out bit-exact
+                     t_ref 0.84s / t_par 7.1s
+  sat 8K i16, bias 12k: 233,508 steps, 82 chunks,   2 sweeps
+                     crit-path 5,700 = T/41, exact 83/83, out bit-exact
+                     t_ref 0.10s / t_par 2.5s
+                     (verify: 81/81 lanes with acc:=garbage merge bit-exact)
+  adpcm 1K samples : 112,660 steps, 65 chunks, wavefront +1/sweep -> WALL
+                     (acc error is a persistent offset; clamping never fires)
+  hash 8KB         : 200,733 steps, 129 chunks, wavefront +1/sweep -> WALL
+
+Performance honesty:
+  * Dispatch-bound interpreter: 1 step ~0.57ms (numpy, B=512) / ~8.4ms
+    (MLX, launch overhead). mx.compile made it WORSE (134ms/step).
+  * t_par > t_ref everywhere: the win is in critical-path STEPS
+    (sweeps x K << T), not wall-clock, at this batch scale.
+  * Metal pays off only at B >> 10^3 or with a compiled/lowered step fn.
+  * Loop-period alignment matters: variable-length iterations need K
+    multiple of the instruction pattern period (sat: 57 instr/4 bytes),
+    else boundary pc drifts and nothing merges.
