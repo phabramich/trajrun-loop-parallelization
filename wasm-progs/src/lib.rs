@@ -45,6 +45,33 @@ pub extern "C" fn adpcm_decode(input: *const u8, n_bytes: usize, out: *mut i16) 
     total
 }
 
+/// G.726/G.722-стиль leaky ADPCM: оба состояния (pred, index) имеют
+/// утечку 15/16 (<1 по спектру Якобиана) -> любая ошибка начального
+/// состояния затухает до точного целочисленного нуля за ~180–240 сэмплов.
+#[no_mangle]
+pub extern "C" fn adpcm_leaky(input: *const u8, n_bytes: usize, out: *mut i16) -> usize {
+    let mut pred: i32 = 0;
+    let mut index: i32 = 0;
+    let total = n_bytes * 2;
+    let mut o: usize = 0;
+    while o < total {
+        let byte = unsafe { *input.add(o >> 1) } as i32;
+        let nib = (byte >> (((o & 1) as i32) * 4)) & 15;
+        let idx_delta = unsafe { *INDEX_TABLE.as_ptr().add((nib & 7) as usize) };
+        index = (((index * 15) >> 4) + idx_delta + 2).clamp(0, 88);
+        let step = unsafe { *STEP_TABLE.as_ptr().add(index as usize) };
+        let mut diff = step >> 3;
+        diff += ((nib & 4) >> 2) * step;
+        diff += ((nib & 2) >> 1) * (step >> 1);
+        diff += (nib & 1) * (step >> 2);
+        let signed = 0i32.wrapping_sub(diff) & (0i32.wrapping_sub((nib >> 3) & 1));
+        pred = (((pred * 15) >> 4) + diff + signed * 2).clamp(-32768, 32767);
+        unsafe { *out.add(o) = pred as i16 };
+        o += 1;
+    }
+    total
+}
+
 /// Кавычковый лексер построчного формата: state 0=вне, 1=в кавычках,
 /// 2=escape. '\n' — жёсткий ресет в 0 из любого состояния: любые две
 /// траектории сливаются на первом переводе строки (как у Mytkowicz).

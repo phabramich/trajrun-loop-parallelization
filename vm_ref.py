@@ -217,6 +217,33 @@ def adpcm_decode_py(data):
     return out
 
 
+def adpcm_leaky_encode(samples):
+    """Leaky ADPCM encoder (G.726/G.722 style, leak 15/16 on pred and index)."""
+    pred, index = 0, 0
+    nibs = []
+    for s in samples:
+        s = max(-32768, min(32767, int(s)))
+        step = STEP_TABLE[index]
+        diff = s - ((pred * 15) >> 4)
+        nib = 8 if diff < 0 else 0
+        adiff = abs(diff)
+        if adiff >= step: nib |= 4; adiff -= step
+        if adiff >= step >> 1: nib |= 2; adiff -= step >> 1
+        if adiff >= step >> 2: nib |= 1
+        index = max(0, min(88, ((index * 15) >> 4) + IDX_TABLE[nib & 7] + 2))
+        step = STEP_TABLE[index]
+        d = step >> 3
+        if nib & 4: d += step
+        if nib & 2: d += step >> 1
+        if nib & 1: d += step >> 2
+        pred = max(-32768, min(32767, ((pred * 15) >> 4) + (-d if nib & 8 else d)))
+        nibs.append(nib)
+    out = bytearray(len(nibs) // 2)
+    for i in range(len(out)):
+        out[i] = nibs[2 * i] | (nibs[2 * i + 1] << 4)
+    return bytes(out)
+
+
 def gen_input(n_samples=8192, seed=1):
     random.seed(seed)
     return [int(12000 * math.sin(i * 0.05) + random.randint(-1500, 1500))

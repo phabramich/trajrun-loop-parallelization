@@ -108,3 +108,32 @@ Performance honesty:
   * Loop-period alignment matters: variable-length iterations need K
     multiple of the instruction pattern period (sat: 57 instr/4 bytes),
     else boundary pc drifts and nothing merges.
+
+=== wasm_metal.py: WASM -> Native Metal Kernel (mx.fast.metal_kernel) ==
+Fixes both walls:
+  1. Engineering wall: transpiles flat WASM into native Metal Shading
+     Language with register locals/stack (uint l*, s*) and fused basic-block
+     do-while loops. 1 sweep of 15M-31M WASM steps takes ~1-2 ms on Metal.
+  2. Algorithmic wall:
+     - Prologue alignment (loop_pc, depth=0) + probe3 (d2 == 0 separates
+       linear induction counters from dynamic carried state).
+     - Contractive state design: adpcm_leaky (15/16 leak on both pred and
+       index, G.726/G.722 style) -> 100% trajectories heal in ~180 samples.
+     - Finite-state Enum+Scan on Metal (3xC lanes + log2(C) scan): solves
+       fsm_lex in 1 rollout + 10 scan steps even on pure Z_2 quote streams
+       (no \n, no \) where Jacobi hits a group-theoretic wall.
+
+Benchmark (C=1024 chunks on Apple Metal vs 1-thread same Metal kernel):
+  [1]  fsm_lex CSV 256KB (\n resets, 15.2M steps):
+       Jacobi 2 sweeps, bit-exact=True | 1-thr 39.41ms vs 1024-thr 6.02ms (6.55x)
+  [2a] fsm_lex 256KB NO \n, with \" escapes (15.2M steps):
+       Cerny word \"a\" merges {0,1,2}->1! Jacobi 5 sweeps | 3.04ms (12.97x)
+  [2b] fsm_lex 256KB NO \n, NO \ (pure Z_2 group, 15.2M steps):
+       Jacobi -> WALL; Enum+Scan: 1 rollout + 10 scan steps, bit-exact=True
+       1-thr 30.61ms vs Enum+Scan 2.11ms (14.48x)
+  [3]  sat_acc 262K i16 samples (7.47M steps):
+       Jacobi 2 sweeps, bit-exact=True | 1-thr 35.19ms vs 1024-thr 1.84ms (19.16x)
+  [4a] adpcm_decode standard IMA (lambda=1.0, 31.2M steps):
+       Jacobi -> wavefront +1/sweep (WALL)
+  [4b] adpcm_leaky G.726 style (lambda=15/16, 31.2M steps):
+       Jacobi 2 sweeps, bit-exact=True | 1-thr 80.93ms vs 1024-thr 3.71ms (21.84x)
