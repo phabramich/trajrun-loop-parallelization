@@ -137,3 +137,16 @@ Benchmark (C=1024 chunks on Apple Metal vs 1-thread same Metal kernel):
        Jacobi -> wavefront +1/sweep (WALL)
   [4b] adpcm_leaky G.726 style (lambda=15/16, 31.2M steps):
        Jacobi 2 sweeps, bit-exact=True | 1-thr 80.93ms vs 1024-thr 3.71ms (21.84x)
+
+Anderson acceleration (PRIOR_ART steal-list) — measured result:
+  Implemented in run_jacobi(anderson_m) on dyn_locals only (discrete
+  components copied from last iterate). Outcome: sat_acc 2->2 sweeps,
+  adpcm_leaky 2->2 sweeps (nothing to accelerate), fsm_lex escape-case
+  5->9 sweeps (WORSE: convex combination of iterates injects invalid
+  discrete states that the sync word must re-heal). Verdict: not
+  applicable to discrete VM boundaries; kept behind flag, default off.
+  Honest negative result on the top prior-art suggestion.
+
+Other polish applied in same pass:
+  - immediate commit: final output write reuses the converged-start
+    rollout instead of a separate commit sweep.

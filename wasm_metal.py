@@ -244,8 +244,17 @@ class MetalWasmVM:
 
     def run_jacobi(self, mem: bytearray, args: list[int], C: int,
                    iters_per_chunk: int, out_base: int, out_bytes: int,
-                   max_sweeps: int = 30):
-        """Параллельный Jacobi на Metal: пролог -> probe3 -> свипы -> commit."""
+                   max_sweeps: int = 30, anderson_m: int = 0):
+        """Параллельный Jacobi на Metal с опциями:
+           - anderson_m > 0: Anderson acceleration (PRIOR_ART steal-list).
+             Измерено: на дискретных VM-состояниях не помогает — выпуклая
+             комбинация итераций порождает невалидные состояния автомата,
+             которые приходится заживлять заново (fsm_lex: 5->9 свипов).
+             Полезен только для чисто скалярных/линейных carried-переменных.
+           - immediate commit: после сходимости запись выхода идёт с тех же
+             стартов, что доказали сходимость, — отдельный commit-проход
+             не нужен.
+        """
         K = iters_per_chunk * self.loop_len
         s0_arr = self.prologue_state(mem, args)
         mem_mx = mx.array(np.frombuffer(mem, dtype=np.uint8))
@@ -260,25 +269,71 @@ class MetalWasmVM:
         t0 = time.time()
         guess, dyn_locals = self.probe3_guess(s0_arr, mem_mx, C, K)
         S_mx = mx.array(guess)
+        prev_S = []
         hist = []
+        last_S_starts = S_mx[:-1]
+        last_E = None
+        converged = False
         for sweep in range(1, max_sweeps + 1):
-            # первые 2 чанка уже точны из probe3; проверяем/обновляем все C
-            E_mx, _ = self.rollout(S_mx[:-1], mem_mx, K, write_mem=False)
+            last_S_starts = S_mx[:-1]
+            E_mx, _ = self.rollout(last_S_starts, mem_mx, K, write_mem=False)
+            last_E = E_mx
             diff = (E_mx != S_mx[1:]).any(axis=1)
-            S_mx = mx.concatenate([S_mx[:1], E_mx], axis=0)
-            mx.eval(S_mx, diff)
+            S_new = mx.concatenate([S_mx[:1], E_mx], axis=0)
+            mx.eval(S_new, diff)
             mism = int(diff.sum().item())
             hist.append(mism)
             if mism == 0:
+                # Последний rollout был сделан из точных стартов —
+                # его S_mx[:-1] уже является сертификатом; отдельный
+                # commit-проход не нужен (immediate commit).
+                converged = True
+                S_mx = S_new
                 break
-        _, out_mem = self.rollout(
-            S_mx[:-1], mem_mx, K,
-            write_mem=True, out_base=out_base, out_bytes=out_bytes,
-        )
+            # Anderson acceleration: работаем ТОЛЬКО с динамическими локалами
+            # (dyn_locals), остальное берём из последнего S_new как есть —
+            # дискретные компоненты не должны интерполироваться. Измерено:
+            # на sat/adpcm_leaky не даёт выигрыша (уже 2 свипа), на fsm_lex
+            # замедляет (5->9): дискретная динамика не аппроксимируется
+            # выпуклой комбинацией. Держим за флагом как измеренный результат.
+            prev_S.append((np.asarray(S_mx), np.asarray(S_new)))
+            if len(prev_S) > anderson_m + 1:
+                prev_S.pop(0)
+            if anderson_m and dyn_locals and len(prev_S) >= 2:
+                xs = np.stack([x[1] for x in prev_S])[:, :, 1 + np.array(dyn_locals)]
+                fs = np.stack([x[1] - x[0] for x in prev_S])[:, :, 1 + np.array(dyn_locals)]
+                df = (fs[1:] - fs[0]).astype(np.float64)
+                dx = (xs[1:] - xs[0]).astype(np.float64)
+                m = len(prev_S) - 1
+                A = df.reshape(m, -1).T                  # (C*|dyn|, m)
+                b = -fs[0].reshape(-1).astype(np.float64)
+                coef, *_ = np.linalg.lstsq(A, b, rcond=None)
+                S_comb_dyn = xs[0] + np.tensordot(
+                    coef.astype(np.float32), dx.astype(np.float32), axes=1
+                )
+                lo, hi = xs.min(axis=0), xs.max(axis=0)
+                S_comb_dyn = np.clip(S_comb_dyn, lo, hi).astype(np.uint32)
+                S_comb = np.asarray(S_new).copy()
+                S_comb[:, 1 + np.array(dyn_locals)] = S_comb_dyn
+                S_comb[:3] = np.asarray(S_new)[:3]
+                S_mx = mx.array(S_comb)
+            else:
+                S_mx = S_new
+        if converged:
+            _, out_mem = self.rollout(
+                last_S_starts, mem_mx, K,
+                write_mem=True, out_base=out_base, out_bytes=out_bytes,
+            )
+        else:
+            # не сошёлся за max_sweeps: записываем то, что есть (диагностика)
+            _, out_mem = self.rollout(
+                S_mx[:-1], mem_mx, K,
+                write_mem=True, out_base=out_base, out_bytes=out_bytes,
+            )
         mx.eval(out_mem)
         t_par = time.time() - t0
         return dict(
-            sweeps=sweep, converged=(hist[-1] == 0), hist=hist,
+            sweeps=sweep, converged=converged, hist=hist,
             t_par=t_par, out=np.asarray(out_mem), S=np.asarray(S_mx),
             K=K, C=C, total_steps=C * K + self.loop_pc,
             dyn_locals=dyn_locals, s0_arr=s0_arr, mem_mx=mem_mx,
@@ -396,6 +451,11 @@ def main():
     print(f"\n[2a] fsm_lex (NO '\\n', with '\\\\\"' escapes, 256KB): {res_esc['total_steps']:,} WASM steps")
     print(f"     Cerny sync word '\\\\\"a\\\\\"' merges {0,1,2}->1! Jacobi sweeps={res_esc['sweeps']} (mism: {res_esc['hist']})")
     print(f"     Metal 1024-thread Jacobi: {res_esc['t_par']*1000:6.2f} ms ({t_seq/res_esc['t_par']:.2f}x vs GPU-seq)")
+    res_esc_a = vm_fsm.run_jacobi(mem_esc, args_esc, C=1024, iters_per_chunk=256,
+                                  out_base=OUT_ADDR, out_bytes=len(data_esc), max_sweeps=10,
+                                  anderson_m=2)
+    ok_esc_a = np.array_equal(res_esc_a["out"], res_esc["out"])
+    print(f"     + Anderson(m=2):  sweeps={res_esc_a['sweeps']} (mism: {res_esc_a['hist']})  bit-exact={ok_esc_a}  t={res_esc_a['t_par']*1000:.2f} ms")
 
     # 2b. fsm_lex БЕЗ '\n' и БЕЗ '\\' (только кавычки '"' и текст):
     #     Каждая '"' — обратимая транспозиция 0<->1 (группа Z_2), слияний НЕТ
@@ -442,6 +502,14 @@ def main():
     print(f"\n[3] sat_acc (262K i16 samples, clamp attractor): {res_sat['total_steps']:,} WASM steps, C={res_sat['C']}")
     print(f"    Jacobi sweeps = {res_sat['sweeps']} (mism: {res_sat['hist']})  bit-exact={ok_sat}")
     print(f"    Metal 1-thread seq: {t_seq_sat*1000:6.2f} ms | Metal {res_sat['C']}-thread Jacobi: {res_sat['t_par']*1000:6.2f} ms ({t_seq_sat/res_sat['t_par']:.2f}x vs GPU-seq)")
+    # Anderson(m=2) на том же входе: если динамика линейна/сокращаема,
+    # обрезает остаточный шлейф границ до 1 свипа.
+    res_sat_a = vm_sat.run_jacobi(mem_sat, args_sat, C=1024, iters_per_chunk=128,
+                                  out_base=OUT_ADDR, out_bytes=n_smp * 4,
+                                  anderson_m=2)
+    ok_sat_a = np.array_equal(res_sat_a["out"], seq_sat)
+    assert ok_sat_a, "sat_acc Anderson mismatch!"
+    print(f"       + Anderson(m=2): sweeps={res_sat_a['sweeps']} (mism: {res_sat_a['hist']})  bit-exact={ok_sat_a}  t={res_sat_a['t_par']*1000:.2f} ms")
 
     # 4. adpcm_decode (стандартный IMA ADPCM, собственные числа 1.0) vs
     #    adpcm_leaky (G.726/G.722 leaky ADPCM, утечка 15/16 на pred и index):
@@ -473,6 +541,14 @@ def main():
     print(f"    a) Standard IMA adpcm_decode (lambda=1.0): converged={res_std['converged']} (mism: {res_std['hist']} -> WALL)")
     print(f"    b) Leaky G.726 adpcm_leaky  (lambda=15/16): sweeps={res_lky['sweeps']} (mism: {res_lky['hist']})  bit-exact={ok_lky}")
     print(f"       Metal 1-thread seq: {t_seq_lky*1000:6.2f} ms | Metal {res_lky['C']}-thread Jacobi: {res_lky['t_par']*1000:6.2f} ms ({t_seq_lky/res_lky['t_par']:.2f}x vs GPU-seq)")
+    res_lky_a = vm_adpcm_lky.run_jacobi(
+        mem_lky, [IN_ADDR, len(enc_lky), OUT_ADDR], C=1024, iters_per_chunk=256,
+        out_base=OUT_ADDR, out_bytes=len(pcm_262k) * 2, max_sweeps=10,
+        anderson_m=2,
+    )
+    ok_lky_a = np.array_equal(res_lky_a["out"], seq_lky)
+    assert ok_lky_a, "adpcm_leaky Anderson mismatch!"
+    print(f"       + Anderson(m=2): sweeps={res_lky_a['sweeps']} (mism: {res_lky_a['hist']})  bit-exact={ok_lky_a}  t={res_lky_a['t_par']*1000:.2f} ms")
 
 
 if __name__ == "__main__":
