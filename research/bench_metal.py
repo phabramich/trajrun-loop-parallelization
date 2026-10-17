@@ -10,10 +10,10 @@ import time
 import mlx.core as mx
 import numpy as np
 
-import parallel_run_mlx as m
-from parallel_run import jacobi as cpu_jacobi
-from parallel_run import newton as cpu_newton
-from parallel_run import sequential
+from research import parallel_run_mlx as m
+from research.parallel_run import jacobi as cpu_jacobi
+from research.parallel_run import newton as cpu_newton
+from research.parallel_run import sequential
 
 rng = np.random.default_rng(0)
 

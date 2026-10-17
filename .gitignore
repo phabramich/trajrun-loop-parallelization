@@ -1,4 +1,7 @@
 .venv/
 __pycache__/
 wasm-progs/target/
-.commit_msg
+*.commit_msg
+.DS_Store
+*.wasm
+!wasm-progs/**/*.wasm

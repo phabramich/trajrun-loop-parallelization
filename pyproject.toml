@@ -1,6 +1,7 @@
 [project]
 name = "parallel-computation-demo"
 version = "0.1.0"
+description = "Trajectory-parallel execution of sequential Rust->WASM programs on Apple Metal (Jacobi boundary iteration + auto finite-state scan, bit-exact)"
 requires-python = ">=3.13"
 dependencies = [
     "mlx>=0.32.4",

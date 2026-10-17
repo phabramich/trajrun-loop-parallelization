@@ -26,7 +26,27 @@ import mlx.core as mx
 from wasm_load import Module
 from vm_ref import (Program, make_memory, adpcm_encode, adpcm_leaky_encode,
                     gen_input)
-from vm_bench import csv_text, biased_i16
+
+def csv_text(n, seed=3):
+    random.seed(seed)
+    out = bytearray()
+    while len(out) < n:
+        line = []
+        for _ in range(random.randint(3, 6)):
+            w = "".join(random.choice("abc,\"\\de")
+                        for _ in range(random.randint(2, 9)))
+            if random.random() < 0.4:
+                w = '"' + w + '"'
+            line.append(w)
+        out += ",".join(line).encode() + b"\n"
+    return bytes(out[:n])
+
+
+def biased_i16(n, bias=3000, seed=4):
+    random.seed(seed)
+    return struct.pack(f"<{n}h",
+                       *[bias + random.randint(-6000, 3000)
+                         for _ in range(n)])
 
 
 def _emit_op(prog: Program, pc: int, with_pc: bool = True,

@@ -10,7 +10,7 @@ import time
 
 import numpy as np
 
-from parallel_run import sequential, jacobi, newton
+from research.parallel_run import sequential, jacobi, newton
 
 np.seterr(over="ignore", invalid="ignore")  # chaotic Jacobians legitimately overflow
 rng = np.random.default_rng(0)

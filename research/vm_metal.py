@@ -15,7 +15,7 @@ import numpy as np
 try:
     import mlx.core as mx
 except ImportError:
-    from np_shim import np_shim as mx
+    from research.np_shim import np_shim as mx
 from vm_ref import Program
 
 U32 = np.uint32(0xFFFFFFFF)

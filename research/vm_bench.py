@@ -13,8 +13,8 @@ import math, random, struct, time
 import numpy as np
 from wasm_load import Module
 from vm_ref import Program, make_memory, adpcm_encode, gen_input
-from vm_exec import run_parallel
-from np_shim import np_shim
+from research.vm_exec import run_parallel
+from research.np_shim import np_shim
 
 WASM = "wasm-progs/target/wasm32-unknown-unknown/release/wasm_progs.wasm"
 IN, OUT = 0x20000, 0x40000
@@ -50,7 +50,7 @@ def run(mod, name, mem, args, K, max_sweeps, label, backend=None):
                        max_sweeps=max_sweeps, ref_states=True,
                        verbose=False, backend=backend)
     # точность выхода: собрать store'ы сходившейся трассы
-    from vm_exec import assemble_output
+    from research.vm_exec import assemble_output
     out = assemble_output(res)
     # опорный выход из scalar-прогона
     ref_out = {a: v for a, v, _ in res["stores"]}

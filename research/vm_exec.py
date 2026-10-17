@@ -11,9 +11,9 @@ pc — по фазе цикла. Это измеряет заживляемос�
 
 import time
 import numpy as np
-import vm_metal
+from research import vm_metal
 from vm_ref import Program
-from vm_metal import BatchVM
+from research.vm_metal import BatchVM
 
 
 def boundary_states(ref_states, K, nsteps):
