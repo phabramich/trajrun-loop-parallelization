@@ -39,3 +39,34 @@ fn fsm_cpu_bit_exact_vs_reference() {
         assert_eq!(got[i], st, "mismatch at {i}");
     }
 }
+
+#[test]
+fn lcg_affine_bit_exact_vs_reference() {
+    if !have("cc") {
+        return;
+    }
+    let bin = env!("CARGO_BIN_EXE_trajrun");
+    let dir = std::env::temp_dir().join("trajrun_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let step = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/lcg.c");
+    let mut xs = vec![0u8; 1 << 20];
+    let mut r = 0xdeadbeefu64;
+    for x in xs.iter_mut() {
+        r ^= r << 13; r ^= r >> 7; r ^= r << 17;
+        *x = r as u8;
+    }
+    let inp = dir.join("lcg_in.bin");
+    let out = dir.join("lcg_out.bin");
+    std::fs::write(&inp, &xs).unwrap();
+    let o = Command::new(bin).args([step, inp.to_str().unwrap(), out.to_str().unwrap()])
+        .output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let got = std::fs::read(&out).unwrap();
+    // scalar oracle: same LCG
+    let mut s = 0u32;
+    for (i, &x) in xs.iter().enumerate() {
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223).wrapping_add(x as u32);
+        let want = &got[i * 4..i * 4 + 4];
+        assert_eq!(s.to_le_bytes(), want, "mismatch at {i}");
+    }
+}

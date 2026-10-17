@@ -357,6 +357,188 @@ fn serial_run(d: &Dylib, spec: &Spec, bytes: &[u8]) -> Vec<u8> {
     ys
 }
 
+// ------------------------------------------- affine Z/2^32 exact scan --
+//
+// If the step is affine in state over Z/2^32 — f(s,x) = A·s + b(x) — the
+// chunk map is (A^L, B_c) and boundary states compose EXACTLY: s*_c =
+// A^L·s*_{c-1} + B_{c-1}, with B_c = (chunk end from any known start) -
+// A^L·start. No speculation, no merging required: works for LCGs, pure
+// integrators, counters — recurrences that never merge and are otherwise
+// walls. Detection is exact (integer probes), so false positives just
+// fail --verify rather than corrupt output.
+
+type Mat = Vec<Vec<u32>>; // nf x nf over Z/2^32 (wrapping arithmetic)
+
+fn matmul(a: &Mat, b: &Mat) -> Mat {
+    let n = a.len();
+    let mut r = vec![vec![0u32; n]; n];
+    for i in 0..n {
+        for k in 0..n {
+            for j in 0..n {
+                r[i][k] = r[i][k].wrapping_add(a[i][j].wrapping_mul(b[j][k]));
+            }
+        }
+    }
+    r
+}
+fn matvec(a: &Mat, v: &[u32]) -> Vec<u32> {
+    a.iter()
+        .map(|row| {
+            row.iter()
+                .zip(v)
+                .fold(0u32, |s, (a, b)| s.wrapping_add(a.wrapping_mul(*b)))
+        })
+        .collect()
+}
+fn matpow(a: &Mat, mut e: u64) -> Mat {
+    let n = a.len();
+    let mut r: Mat = (0..n)
+        .map(|i| (0..n).map(|j| u32::from(i == j)).collect())
+        .collect();
+    let mut b = a.clone();
+    while e > 0 {
+        if e & 1 == 1 {
+            r = matmul(&r, &b);
+        }
+        e >>= 1;
+        if e > 0 {
+            b = matmul(&b, &b);
+        }
+    }
+    r
+}
+
+/// Probe whether step(s,x) is affine in s over Z/2^32; returns A.
+/// Integer-only fields (float affine is never bit-exact anyway).
+fn detect_affine(d: &Dylib, spec: &Spec, bytes: &[u8]) -> Option<Mat> {
+    let (xsz, nf) = (spec.x.sz(), spec.fields.len());
+    if nf == 0 || nf > 8 || !spec.fields.iter().all(|f| f.1.inty()) {
+        return None;
+    }
+    let n = bytes.len() / xsz;
+    let st = |s: &mut [u32; 16], x: u32| unsafe { (d.step)(s.as_mut_ptr(), x) };
+    let mut a_opt: Option<Mat> = None;
+    let zero = [0u32; 16];
+    // columns of A from unit basis states; must be identical for all x
+    for i in 0..8 {
+        let x = if n == 0 { 0 } else { xbits(bytes, i * n / 8, xsz) };
+        let mut v0 = zero;
+        st(&mut v0, x);
+        let mut cols = vec![vec![0u32; nf]; nf]; // cols[j][field]
+        for j in 0..nf {
+            let mut e = zero;
+            e[j] = 1;
+            st(&mut e, x);
+            for f2 in 0..nf {
+                cols[j][f2] = e[f2].wrapping_sub(v0[f2]);
+            }
+        }
+        let a: Mat = (0..nf)
+            .map(|f2| (0..nf).map(|j| cols[j][f2]).collect())
+            .collect();
+        match &a_opt {
+            None => a_opt = Some(a),
+            Some(prev) => {
+                if *prev != a {
+                    return None;
+                }
+            }
+        }
+    }
+    let a = a_opt.unwrap();
+    // verify linearity on random states (exact — integer ring)
+    let mut rng = 0x9e3779b9u32;
+    let mut nrng = move || {
+        rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+        rng
+    };
+    for i in 0..16 {
+        let x = if n == 0 { 0 } else { xbits(bytes, (nrng() as usize) % n, xsz) };
+        let _ = i;
+        let mut v0 = zero;
+        st(&mut v0, x);
+        let mut s = [0u32; 16];
+        for j in 0..nf {
+            s[j] = nrng();
+        }
+        let mut got = s;
+        st(&mut got, x);
+        let av = matvec(&a, &s[..nf]);
+        for f2 in 0..nf {
+            if got[f2] != v0[f2].wrapping_add(av[f2]) {
+                return None;
+            }
+        }
+    }
+    Some(a)
+}
+
+/// Exact parallel run for affine steps: two native passes, no fixup —
+/// pass 1 gets each chunk's constant term, a serial scan of `nch`
+/// boundaries recovers every true start state, pass 2 emits outputs.
+fn run_affine(d: &Dylib, spec: &Spec, bytes: &[u8], threads: usize,
+               verify: bool, a: &Mat) -> Result<(Vec<u8>, String), String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (xsz, ysz, nf) = (spec.x.sz(), spec.y.sz(), spec.fields.len());
+    let n = bytes.len() / xsz;
+    let chunks = (4 * threads).max(1);
+    let len = n.div_ceil(chunks);
+    let nch = n.div_ceil(len);
+    let al = matpow(a, len as u64);
+    let init: Vec<u32> = d.init[..nf].to_vec();
+    let mut ys = vec![0u8; n * ysz];
+    let mut ends = vec![[0u32; 16]; nch];
+    let mut starts = vec![[0u32; 16]; nch];
+    let pass = |starts: &[[u32; 16]], ends: &mut Vec<[u32; 16]>, ys: &mut Vec<u8>| {
+        let yp: Vec<usize> = ys
+            .chunks_mut(len * ysz)
+            .map(|c| c.as_mut_ptr() as usize)
+            .collect();
+        let ep = ends.as_mut_ptr() as usize;
+        let bp = bytes.as_ptr() as usize;
+        let sp = starts.as_ptr() as usize;
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|sc| {
+            for _ in 0..threads.min(nch) {
+                sc.spawn(|| loop {
+                    let c = next.fetch_add(1, Ordering::Relaxed);
+                    if c >= nch {
+                        break;
+                    }
+                    let clen = len.min(n - c * len);
+                    let mut s = unsafe { *(sp as *const [u32; 16]).add(c) };
+                    unsafe {
+                        (d.run)(s.as_mut_ptr(), (bp + c * len * xsz) as *const u8,
+                                yp[c] as *mut u8, clen as u64,
+                                std::ptr::null_mut(), 0);
+                        *(ep as *mut [u32; 16]).add(c) = s;
+                    }
+                });
+            }
+        });
+    };
+    pass(&vec![{ let mut v = [0u32; 16]; v[..nf].copy_from_slice(&init); v }; nch],
+         &mut ends, &mut ys);
+    // B_c = ends[c] - A^L·init; s*_{c+1} = A^L·s*_c + B_c
+    let mut s = init.clone();
+    for c in 0..nch - 1 {
+        starts[c][..nf].copy_from_slice(&s);
+        let bc: Vec<u32> = (0..nf)
+            .map(|f2| ends[c][f2].wrapping_sub(matvec(&al, &init)[f2]))
+            .collect();
+        let av = matvec(&al, &s);
+        for f2 in 0..nf {
+            s[f2] = av[f2].wrapping_add(bc[f2]);
+        }
+    }
+    starts[nch - 1][..nf].copy_from_slice(&s);
+    pass(&starts, &mut vec![[0u32; 16]; nch], &mut ys);
+    if verify && serial_run(d, spec, bytes) != ys {
+        return Err("affine output != serial — BUG".into());
+    }
+    Ok((ys, format!("affine chunks={nch} (exact Z/2^32 scan)")))
+}
+
 /// Speculative multicore run — same algorithm as trajpar::run_speculative,
 /// but phase 1 calls the batch `traj_run` once per chunk (native loop
 /// speed); only the sequential fix-up pays the per-element FFI call, and
@@ -398,6 +580,9 @@ fn run_cpu(d: &Dylib, spec: &Spec, bytes: &[u8], threads: usize, verify: bool)
         }
     }
     if !speculative {
+        if let Some(a) = detect_affine(d, spec, bytes) {
+            return run_affine(d, spec, bytes, threads, verify, &a);
+        }
         let ys = serial_run(d, spec, bytes);
         let m = if threads <= 1 || p == 0 { "serial" } else { "serial(wall)" };
         return Ok((ys, m.into()));
@@ -695,8 +880,11 @@ mod gpu {
         }
 
         /// xs_bytes: raw input file; returns rounds used, fills ys_bytes.
+        /// `aff`: optional Z/2^32-affine matrix of the step — lets us inject
+        /// exact boundary states after the first round (one extra round
+        /// confirms the fixpoint instead of merging).
         pub fn run(&self, spec: &Spec, xs_bytes: &[u8], ys_bytes: &mut Vec<u8>,
-                   max_rounds: usize) -> Result<usize, String> {
+                   max_rounds: usize, aff: Option<&super::Mat>) -> Result<usize, String> {
             let (c, l, m, nf) = (self.c, self.l, self.m, self.nf);
             let nck = l / m;
             let (xsz, ysz) = (spec.x.sz(), spec.y.sz());
@@ -727,16 +915,40 @@ mod gpu {
                 .iter()
                 .flat_map(|&v| std::iter::repeat(v).take(c))
                 .collect();
-            let mut rounds = 1;
-            for _ in 0..max_rounds {
-                let mut s_new = vec![0u32; nf * c];
-                for f in 0..nf {
-                    s_new[f * c] = self.init[f];
-                    for cc in 1..c {
-                        s_new[f * c + cc] = e[f * c + cc - 1];
+            // affine step: exact boundaries s*_c = A^L·s*_{c-1} + B_{c-1}
+            // with B_c = e[c] - A^L·init, computed once from the init run.
+            let mut scanned: Option<Vec<u32>> = aff.map(|a| {
+                let al = super::matpow(a, l as u64);
+                let init_al = super::matvec(&al, &self.init);
+                let mut s = self.init.clone();
+                let mut out = vec![0u32; nf * c];
+                for cc in 0..c {
+                    for f2 in 0..nf {
+                        out[f2 * c + cc] = s[f2];
+                    }
+                    let av = super::matvec(&al, &s);
+                    for f2 in 0..nf {
+                        s[f2] = av[f2]
+                            .wrapping_add(e[f2 * c + cc].wrapping_sub(init_al[f2]));
                     }
                 }
+                out
+            });
+            let mut rounds = 1;
+            let mut converged = false;
+            for _ in 0..max_rounds {
+                let s_new = scanned.take().unwrap_or_else(|| {
+                    let mut v = vec![0u32; nf * c];
+                    for f in 0..nf {
+                        v[f * c] = self.init[f];
+                        for cc in 1..c {
+                            v[f * c + cc] = e[f * c + cc - 1];
+                        }
+                    }
+                    v
+                });
                 if s_new == s_used {
+                    converged = true;
                     break;
                 }
                 Self::w32(&s_in, &s_new);
@@ -811,8 +1023,12 @@ mod gpu {
                 s_used = s_new;
                 rounds += 1;
                 if conv {
+                    converged = true;
                     break;
                 }
+            }
+            if !converged {
+                return Err(format!("no convergence in {rounds} rounds (wall)"));
             }
             self.enc(&self.k_out, &[&ys, &y2], c * l);
             let need = c * l * ysz;
@@ -928,7 +1144,12 @@ fn main() -> Result<(), String> {
         let d = build_dylib(&spec)?;
         if let Some(inp) = pos.get(1) {
             let bytes = fs::read(inp).map_err(|e| format!("{inp}: {e}"))?;
-            eprintln!("check: compile ok; {}", probe_merge(&d, &spec, &bytes));
+            let aff = if detect_affine(&d, &spec, &bytes).is_some() {
+                "; affine over Z/2^32 (exact scan, no speculation needed)"
+            } else {
+                ""
+            };
+            eprintln!("check: compile ok; {}{}", probe_merge(&d, &spec, &bytes), aff);
         } else {
             eprintln!("check: compile ok (no input given — skipped probe)");
         }
@@ -945,15 +1166,16 @@ fn main() -> Result<(), String> {
         let n_elems = bytes.len() / spec.x.sz();
         let want_len = n_elems * spec.y.sz();
         let mut out = Vec::new();
+        let d = build_dylib(&spec)?; // affine detect + verify + fallback
+        let aff = detect_affine(&d, &spec, &bytes);
         match gpu::Engine::new(&spec, n_elems, lanes)
-            .and_then(|e| e.run(&spec, &bytes, &mut out, 64))
+            .and_then(|e| e.run(&spec, &bytes, &mut out, 64, aff.as_ref()))
         {
             Ok(rounds) => {
                 eprintln!("gpu: {rounds} rounds, {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
                 out.truncate(want_len);
                 fs::write(outp, &out).map_err(|e| format!("{outp}: {e}"))?;
                 if verify.unwrap_or(false) {
-                    let d = build_dylib(&spec)?;
                     let want_b = serial_run(&d, &spec, &bytes);
                     let nd = want_b
                         .chunks_exact(spec.y.sz())
