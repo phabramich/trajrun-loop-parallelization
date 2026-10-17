@@ -50,7 +50,16 @@ def biased_i16(n, bias=3000, seed=4):
 
 
 def _emit_op(prog: Program, pc: int, with_pc: bool = True,
-             loop_pc: int = -1) -> str:
+             loop_pc: int = -1, ck: str = "") -> str:
+    s = _emit_op0(prog, pc, with_pc, loop_pc)
+    # ck: checkpoint code after every back-edge tick (guarded by last_ck)
+    if ck and " iters +" in s:
+        s += " " + ck
+    return s
+
+
+def _emit_op0(prog: Program, pc: int, with_pc: bool = True,
+              loop_pc: int = -1) -> str:
     nm, imm, d = prog.names[pc], prog.imms[pc], prog.depth[pc]
     halt_pc = prog.n_instr - 1
     if nm in ("halt", "return"):
@@ -89,35 +98,42 @@ def _emit_op(prog: Program, pc: int, with_pc: bool = True,
     if nm == "f32.const":
         bits = struct.unpack("<I", struct.pack("<f", imm))[0]
         return f"s{d} = {bits}u;{pc_s}"
+    # TR/TO: word-granular interleave remap of the input/output regions
+    # (identity when disabled); every byte goes through it, so any access
+    # pattern stays exact
     if nm.startswith("i32.load8_u"):
-        return f"{{ uint a = s{d - 1} + {imm}u; s{d - 1} = (uint)mem[a]; }}{pc_s}"
+        return f"{{ uint a = s{d - 1} + {imm}u; s{d - 1} = (uint)mem[TR(a)]; }}{pc_s}"
     if nm.startswith("i32.load8_s"):
-        return (f"{{ uint a = s{d - 1} + {imm}u; uint v = (uint)mem[a]; "
+        return (f"{{ uint a = s{d - 1} + {imm}u; uint v = (uint)mem[TR(a)]; "
                 f"s{d - 1} = (v & 0x80u) ? (v | 0xFFFFFF00u) : v; }}{pc_s}")
     if nm.startswith("i32.load16_u"):
         return (f"{{ uint a = s{d - 1} + {imm}u; "
-                f"s{d - 1} = (uint)mem[a] | ((uint)mem[a + 1u] << 8); }}{pc_s}")
+                f"s{d - 1} = (uint)mem[TR(a)] | ((uint)mem[TR(a + 1u)] << 8); }}{pc_s}")
     if nm.startswith("i32.load16_s"):
         return (f"{{ uint a = s{d - 1} + {imm}u; "
-                f"uint v = (uint)mem[a] | ((uint)mem[a + 1u] << 8); "
+                f"uint v = (uint)mem[TR(a)] | ((uint)mem[TR(a + 1u)] << 8); "
                 f"s{d - 1} = (v & 0x8000u) ? (v | 0xFFFF0000u) : v; }}{pc_s}")
     if nm in ("i32.load", "f32.load"):
+        # aligned -> one 32-bit load (4x fewer memory ops); else byte path
         return (f"{{ uint a = s{d - 1} + {imm}u; "
-                f"s{d - 1} = (uint)mem[a] | ((uint)mem[a + 1u] << 8) | "
-                f"((uint)mem[a + 2u] << 16) | ((uint)mem[a + 3u] << 24); }}{pc_s}")
+                f"s{d - 1} = ((a & 3u) == 0u) ? *((const device uint*)(mem + TR(a))) : "
+                f"((uint)mem[TR(a)] | ((uint)mem[TR(a + 1u)] << 8) | "
+                f"((uint)mem[TR(a + 2u)] << 16) | ((uint)mem[TR(a + 3u)] << 24)); }}{pc_s}")
     if nm == "i32.store8":
         return (f"if (write_mem) {{ uint a = s{d - 2} + {imm}u - out_base; "
-                f"mem_out[a] = (uint8_t)(s{d - 1} & 0xFFu); }}{pc_s}")
+                f"mem_out[TO(a)] = (uint8_t)(s{d - 1} & 0xFFu); }}{pc_s}")
     if nm == "i32.store16":
         return (f"if (write_mem) {{ uint a = s{d - 2} + {imm}u - out_base; "
-                f"uint v = s{d - 1}; mem_out[a] = (uint8_t)(v & 0xFFu); "
-                f"mem_out[a + 1u] = (uint8_t)((v >> 8) & 0xFFu); }}{pc_s}")
+                f"uint v = s{d - 1}; mem_out[TO(a)] = (uint8_t)(v & 0xFFu); "
+                f"mem_out[TO(a + 1u)] = (uint8_t)((v >> 8) & 0xFFu); }}{pc_s}")
     if nm in ("i32.store", "i64.store", "f32.store"):
         return (f"if (write_mem) {{ uint a = s{d - 2} + {imm}u - out_base; "
-                f"uint v = s{d - 1}; mem_out[a] = (uint8_t)(v & 0xFFu); "
-                f"mem_out[a + 1u] = (uint8_t)((v >> 8) & 0xFFu); "
-                f"mem_out[a + 2u] = (uint8_t)((v >> 16) & 0xFFu); "
-                f"mem_out[a + 3u] = (uint8_t)((v >> 24) & 0xFFu); }}{pc_s}")
+                f"uint v = s{d - 1}; "
+                f"if ((a & 3u) == 0u) {{ *((device uint*)(mem_out + TO(a))) = v; }} else {{ "
+                f"mem_out[TO(a)] = (uint8_t)(v & 0xFFu); "
+                f"mem_out[TO(a + 1u)] = (uint8_t)((v >> 8) & 0xFFu); "
+                f"mem_out[TO(a + 2u)] = (uint8_t)((v >> 16) & 0xFFu); "
+                f"mem_out[TO(a + 3u)] = (uint8_t)((v >> 24) & 0xFFu); }} }}{pc_s}")
     if nm == "i32.eqz":
         return f"s{d - 1} = (s{d - 1} == 0u) ? 1u : 0u;{pc_s}"
     if nm in ("i32.clz", "i32.ctz", "i32.popcnt"):
@@ -199,6 +215,7 @@ class MetalWasmVM:
             if nm == "br_if" and imm == self.loop_pc
         )
         self.loop_len = self.br_pc - self.loop_pc + 1
+        self.remap = (0,) * 6  # (RC, in_base, in_len, lws_in, lws_out, out_len)
         src = self._build_msl()
         self.kern = mx.fast.metal_kernel(
             name=f"wasm_msl_{name}",
@@ -206,8 +223,41 @@ class MetalWasmVM:
             output_names=["state_out", "mem_out"],
             source=src,
         )
+        # live prefix of the state at the loop header: pc + locals + stack
+        self.CW = 1 + self.L + max(0, prog.depth[self.loop_pc])
+        self.kern_ck = mx.fast.metal_kernel(
+            name=f"wasm_msl_ck_{name}",
+            input_names=["state_in", "mem", "params", "ck_in", "end_prev",
+                         "start_prev"],
+            output_names=["state_out", "mem_out", "ck_out"],
+            source=self._build_msl(ck=True),
+        )
 
-    def _build_msl(self) -> str:
+    def rollout_ck(self, state_in, mem_mx, K, M, ck_in=None, end_prev=None,
+                   start_prev=None):
+        """Sweep that records a live-state checkpoint every M iterations.
+        With ck_in/end_prev/start_prev (previous sweep of the same lanes) a
+        lane stops at the first checkpoint equal to its previous trajectory
+        (merged => end = end_prev) — or at once if its start is unchanged.
+        Returns (state_out, ck_out): ck_out always describes the current
+        trajectory, so it can feed the next sweep."""
+        B = state_in.shape[0]
+        assert K % M == 0
+        cmp = ck_in is not None
+        if not cmp:
+            ck_in = mx.zeros((1,), mx.uint32)
+            end_prev = start_prev = mx.zeros((1, self.W), mx.uint32)
+        params = mx.array([B, K, 0, 0, M, int(cmp), *self.remap], dtype=mx.uint32)
+        st, _, ck = self.kern_ck(
+            inputs=[state_in, mem_mx, params, ck_in, end_prev, start_prev],
+            grid=(B, 1, 1), threadgroup=(min(256, B), 1, 1),
+            output_shapes=[(B, self.W), (1,), (B * (K // M) * self.CW,)],
+            output_dtypes=[mx.uint32, mx.uint8, mx.uint32],
+            init_value=0,  # unwritten ckpts: pc=0 never equals a real header pc
+        )
+        return st, ck
+
+    def _build_msl(self, ck: bool = False) -> str:
         prog, L, D, W = self.prog, self.L, self.D, self.W
         n = prog.n_instr
         leaders = {0, n - 1}
@@ -231,6 +281,14 @@ class MetalWasmVM:
             "uint tid = thread_position_in_grid.x;",
             "uint B = params[0]; uint K = params[1];",
             "uint write_mem = params[2]; uint out_base = params[3];",
+            "uint RC = params[6]; uint in_base = params[7]; uint in_len = params[8];",
+            "uint lws_in = params[9]; uint lws_out = params[10]; uint out_len = params[11];",
+            # word w of a region of RC lanes x 2^lws words: (c, j) -> j*RC + c
+            "#define RMAP(off, lws) ((((((off) >> 2) & ((1u << (lws)) - 1u)) * RC"
+            " + (((off) >> 2) >> (lws))) << 2) | ((off) & 3u))",
+            "#define TR(a) ((RC != 0u && ((a) - in_base) < in_len)"
+            " ? in_base + RMAP((a) - in_base, lws_in) : (a))",
+            "#define TO(a) ((RC != 0u && (a) < out_len) ? RMAP((a), lws_out) : (a))",
             "if (tid >= B) return;",
             f"uint base = tid * {W}u;",
             "uint pc = state_in[base + 0u];",
@@ -242,6 +300,26 @@ class MetalWasmVM:
         halt_pc = n - 1
         lines.append("uint step = 0u;")
         lines.append("uint iters = 0u;")
+        ck_code = ""
+        if ck:
+            CW = self.CW
+            live = (["pc"] + [f"l{i}" for i in range(L)]
+                    + [f"s{i}" for i in range(CW - 1 - L)])
+            # layout [q][j][lane]: neighbouring lanes hit neighbouring words
+            eq = " && ".join(f"ck_in[o + {j}u * B] == {v}" for j, v in enumerate(live))
+            rec = " ".join(f"ck_out[o + {j}u * B] = {v};" for j, v in enumerate(live))
+            ck_code = (f"if (iters != last_ck && (iters % M) == 0u) {{ last_ck = iters; "
+                       f"uint o = (iters / M - 1u) * {CW}u * B + tid; "
+                       f"if (cmp != 0u && {eq}) {{ mq = iters / M - 1u; iters = K; }} "
+                       f"else {{ {rec} }} }}")
+            same = " && ".join(f"state_in[base + {j}u] == start_prev[base + {j}u]"
+                               for j in range(CW))
+            lines += [
+                "uint M = params[4]; uint cmp = params[5]; uint NCK = K / M;",
+                "uint last_ck = 0u; uint mq = 0xFFFFFFFFu;",
+                # unchanged start => trajectory identical to previous sweep
+                f"if (cmp != 0u && {same}) {{ mq = 0u; iters = K; }}",
+            ]
         # K = число ИТЕРАЦИЙ цикла (back-edge на loop_pc), не инструкций:
         # счётчик живёт в эмитированных br/br_if -> loop_pc, поэтому границы
         # чанков всегда на заголовке цикла (depth=0) даже при ветвящихся
@@ -253,7 +331,7 @@ class MetalWasmVM:
         for b0, b1 in blocks.items():
             blen = b1 - b0 + 1
             bb = " ".join(_emit_op(prog, p, with_pc=(p == b1),
-                                   loop_pc=self.loop_pc)
+                                   loop_pc=self.loop_pc, ck=ck_code)
                           for p in range(b0, b1 + 1))
             lines.append(
                 f"  if (pc == {b0}u && iters < K) {{ "
@@ -265,11 +343,21 @@ class MetalWasmVM:
         for pc in range(n):
             lines.append(
                 f"    case {pc}u: {{ "
-                f"{_emit_op(prog, pc, True, loop_pc=self.loop_pc)} break; }}")
+                f"{_emit_op(prog, pc, True, loop_pc=self.loop_pc, ck=ck_code)} break; }}")
         lines.append(f"    default: pc = {n - 1}u; break;")
         lines.append("  }")
         lines.append("  step += 1u;")
         lines.append("}")
+        if ck:
+            # merged at checkpoint mq: rest of the trajectory == previous one
+            lines += [
+                "if (mq != 0xFFFFFFFFu) {",
+                f"  for (uint q = mq; q < NCK; ++q) for (uint j = 0u; j < {self.CW}u; ++j)",
+                f"    ck_out[(q * {self.CW}u + j) * B + tid] = ck_in[(q * {self.CW}u + j) * B + tid];",
+                f"  for (uint j = 0u; j < {W}u; ++j) state_out[base + j] = end_prev[base + j];",
+                "  return;",
+                "}",
+            ]
         lines.append("state_out[base + 0u] = pc;")
         for i in range(L):
             lines.append(f"state_out[base + {1 + i}u] = l{i};")
@@ -280,7 +368,8 @@ class MetalWasmVM:
     def rollout(self, state_in: mx.array, mem_mx: mx.array, K: int,
                 write_mem: bool = False, out_base: int = 0, out_bytes: int = 1):
         B = state_in.shape[0]
-        params = mx.array([B, K, int(write_mem), out_base], dtype=mx.uint32)
+        params = mx.array([B, K, int(write_mem), out_base, 0, 0, *self.remap],
+                          dtype=mx.uint32)
         m_sz = out_bytes if write_mem else 1
         return self.kern(
             inputs=[state_in, mem_mx, params],
@@ -302,9 +391,12 @@ class MetalWasmVM:
 
     def probe3_guess(self, s0_arr: np.ndarray, mem_mx: mx.array,
                      C: int, K: int) -> tuple[np.ndarray, list[int]]:
-        """Прогон 2 чанков + фильтрация линейных индукционных переменных по d2 == 0."""
-        e1, _ = self.rollout(mx.array(s0_arr), mem_mx, K)
-        e2, _ = self.rollout(e1, mem_mx, K)
+        """Прогон 2 чанков + фильтрация линейных индукционных переменных по d2 == 0.
+        Проба короче чанка (Kp | K): это 1-лейновый серийный прогон, при K=16K
+        он стоил ~6 мс; линейные шаги масштабируются на K/Kp."""
+        Kp = next(k for k in (256, 128, 64, K) if K % k == 0 and k <= K)
+        e1, _ = self.rollout(mx.array(s0_arr), mem_mx, Kp)
+        e2, _ = self.rollout(e1, mem_mx, Kp)
         mx.eval(e1, e2)
         r0, r1, r2 = s0_arr[0], np.asarray(e1)[0], np.asarray(e2)[0]
         L = self.L
@@ -318,10 +410,12 @@ class MetalWasmVM:
         guess[:, 0] = r0[0]
         guess[:, 1:1 + L] = np.where(
             is_lin[None, :],
-            (l0[None, :] + d1[None, :] * k_idx) % (1 << 32),
+            (l0[None, :] + d1[None, :] * (K // Kp) * k_idx) % (1 << 32),
             l2[None, :],
         ).astype(np.uint32)
-        guess[0], guess[1], guess[2] = r0, r1, r2
+        guess[0] = r0
+        if Kp == K:
+            guess[1], guess[2] = r1, r2
         dyn_locals = np.nonzero(~is_lin)[0].tolist()
         return guess, dyn_locals
 
@@ -547,8 +641,41 @@ class MetalWasmVM:
 
     def run_auto(self, mem: bytearray, args: list[int], C: int,
                  iters_per_chunk: int, out_base: int, out_bytes: int,
-                 max_sweeps: int = 30, stall_after: int = 3,
-                 stall_frac: float = 0.5, max_states: int = 1024):
+                 interleave: tuple[int, int] | None = None, **kw):
+        """interleave=(in_base, in_bytes): word-interleave the input and output
+        regions across the C lanes so neighbouring lanes touch neighbouring
+        words (coalesced). Pure address bijection — results are identical."""
+        mem_mx = mx.array(np.frombuffer(mem, dtype=np.uint8))
+        in_base, in_bytes = interleave or (0, 0)
+        lws = lambda nb: (max(1, -(-nb // (4 * C))) - 1).bit_length()
+        lin, lout = lws(in_bytes), lws(out_bytes)
+        P_in, P_out = (C << lin) * 4, (C << lout) * 4
+        # padding must land on unused (zero) memory, else stay contiguous
+        if (not interleave or in_base + P_in > len(mem)
+                or any(mem[in_base + in_bytes:in_base + P_in])):
+            res = self._run_auto(mem, mem_mx, args, C, iters_per_chunk,
+                                 out_base, out_bytes, **kw)
+            res["out"] = np.asarray(res["out"])
+            return res
+        reg = mem_mx[in_base:in_base + P_in].reshape(C, 1 << lin, 4)
+        mem_il = mx.concatenate([mem_mx[:in_base],
+                                 reg.transpose(1, 0, 2).reshape(-1),
+                                 mem_mx[in_base + P_in:]])
+        self.remap = (C, in_base, P_in, lin, lout, P_out)
+        try:
+            res = self._run_auto(mem, mem_il, args, C, iters_per_chunk,
+                                 out_base, P_out, **kw)
+        finally:
+            self.remap = (0,) * 6
+        out = res["out"].reshape(1 << lout, C, 4).transpose(1, 0, 2)
+        res.update(out=np.asarray(out.reshape(-1)[:out_bytes]), mem_mx=mem_mx,
+                   interleaved=True)
+        return res
+
+    def _run_auto(self, mem: bytearray, mem_mx: mx.array, args: list[int],
+                  C: int, iters_per_chunk: int, out_base: int, out_bytes: int,
+                  max_sweeps: int = 30, stall_after: int = 3,
+                  stall_frac: float = 0.5, max_states: int = 1024):
         """Единая точка входа без ручных подсказок:
         probe3 -> Jacobi-свипы; если mism перестал падать (последний свип
         срезал меньше stall_frac доли оставшихся) — автоматическая
@@ -558,14 +685,13 @@ class MetalWasmVM:
         """
         K = iters_per_chunk
         s0_arr = self.prologue_state(mem, args)
-        mem_mx = mx.array(np.frombuffer(mem, dtype=np.uint8))
         w1, _ = self.rollout(mx.array(s0_arr), mem_mx, self.loop_len)
         w2, _ = self.rollout(mx.zeros((C * 8, self.W), mx.uint32), mem_mx,
                              self.loop_len, write_mem=False)
         w3, wm = self.rollout(mx.zeros((C, self.W), mx.uint32), mem_mx,
                               self.loop_len, write_mem=True,
                               out_base=out_base, out_bytes=out_bytes)
-        mx.eval(w1, w2, w3, wm)
+        mx.eval(w1, w2, w3, wm, *self.rollout_ck(mx.array(s0_arr), mem_mx, 1, 1))
 
         t0 = time.time()
         guess, dyn_cols = self.probe3_guess(s0_arr, mem_mx, C, K)
@@ -585,9 +711,15 @@ class MetalWasmVM:
                     .any(axis=1)
                     | ((E_np[:, 1 + self.L:] != S_np_rows[:, 1 + self.L:])
                        & ~dead).any(axis=1))
+        # work-efficient sweeps: lanes stop at the first checkpoint shared
+        # with their previous trajectory (or at once if the start is unchanged)
+        M = 64 if K % 64 == 0 else K
+        ck = E_prev = S_prev = None
         for sweep in range(1, max_sweeps + 1):
-            E_mx, _ = self.rollout(S_mx[:-1], mem_mx, K, write_mem=False)
-            mx.eval(E_mx)
+            S_in = S_mx[:-1]
+            E_mx, ck = self.rollout_ck(S_in, mem_mx, K, M, ck, E_prev, S_prev)
+            E_prev, S_prev = E_mx, S_in
+            mx.eval(E_mx, ck)
             E_np = np.asarray(E_mx)
             S_np = np.asarray(S_mx)[1:]
             S_new = mx.concatenate([S_mx[:1], E_mx], axis=0)
@@ -602,7 +734,8 @@ class MetalWasmVM:
             # которые реально расходятся на границах (иначе "параметр-который-
             # просто-копируется" всегда даёт ложный 0 merges). merges=0 ->
             # слияний нет за чанк -> enum/стена без лишних свипов.
-            if predict is None:
+            # lazy: a full extra pass; most workloads converge on sweep 2
+            if predict is None and sweep >= 2:
                 # bad = колонки с boundary-несогласованностью (E[c] != S[c+1])
                 # и непозиционные (дельта "выход - вход" не константна — иначе
                 # это счётчик/копируемый параметр, а не carried-состояние).
@@ -673,7 +806,7 @@ class MetalWasmVM:
         return dict(
             sweeps=sweep, converged=(hist[-1] == 0), hist=hist,
             method=method, enum_info=enum_info, predict=predict, t_par=t_par,
-            out=np.asarray(out_mem),
+            out=out_mem,  # mx; converted to numpy by run_auto
             S=np.asarray(S_mx), K=K, C=C, total_steps=C * K * self.loop_len,
             dyn_locals=dyn_cols, s0_arr=s0_arr, mem_mx=mem_mx,
         )

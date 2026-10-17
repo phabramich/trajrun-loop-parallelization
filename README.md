@@ -40,6 +40,33 @@ Chunk boundaries always land on the loop header: `K` counts loop
 `audio_chain` is a real DSP pipeline (2× highpass IIR + peak-hold envelope
 + gain) over 8M samples — the `ffmpeg -af highpass,acompressor` analog.
 
+## Backends: honest baselines (M1, medians)
+
+Three runtimes, same algorithm, different frontends — pick by where your
+data lives and how much codegen you want:
+
+| workload | Rust serial | Rust 8T (`trajpar`) | WASM→Metal | `gpu_step` |
+|---|---|---|---|---|
+| `fsm_lex` CSV 32MB | 70–100 ms | 11.7 ms | 21 ms | **7.4 ms** |
+| `audio_chain` 16M f32 | 41–44 ms | **8.4 ms** | 25 ms | 14.2 ms |
+| IMA ADPCM encoded audio | 83 ms | 83 ms (wall) | wall | — |
+
+- **`trajpar/`** — native Rust crate, `std::thread` multicore, speculative
+  chunks + merge detection + finite-domain scan, exact serial fallback.
+  *The default choice*: no codegen, no GPU, 4–6× over serial on
+  contracting workloads, `serial(wall)` on the rest.
+- **`wasm_metal.py`** — the universal path above. Interpreting arbitrary
+  WASM semantics per lane costs ~6× over a hand kernel; lands at CPU-8T
+  parity, not ahead of it.
+- **`gpu_step.py`** — the GPU niche that actually wins: write the per-step
+  body in MSL (~10 lines), keep all speculative/fixup machinery. ~13× vs
+  serial on 32MB CSV — beats 8 CPU threads. Narrow: one element in, one
+  out, 32-bit state fields only.
+
+GPU wins only when the state merges fast relative to input size and the
+per-step body is trivial; CPU-8T wins on slower-merging f32 state; walls
+are walls everywhere.
+
 ## Quickstart
 
 ```bash
@@ -77,6 +104,9 @@ vm_ref.py        scalar reference interpreter — the correctness oracle
 wasm_metal.py    WASM->MSL JIT kernel, Metal VM, Jacobi runner, probe3
                  (induction-var detection), merge predictor, auto EnumScan
 run_parallel.py  thin CLI/API over the whole pipeline
+gpu_step.py      GPU fast path: hand-written MSL step + speculative
+                 checkpoint rounds — the config that beats multicore CPU
+trajpar/         native Rust multicore backend (std::thread, no deps)
 wasm-progs/      Rust test programs (fsm, adpcm, audio chain, f32, calls)
 research/        earlier lineage: numpy Jacobi/Newton prototypes, spec
                  decode, per-instruction Metal VM (run: python -m research.X)

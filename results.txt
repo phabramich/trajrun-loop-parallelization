@@ -190,3 +190,24 @@ merge distance ~5-9 чанков от самого медленного λ=0.995
 лейнов) 119ms = **14.7x**, бит-точно. Плато ~6400 в hist — волновой фронт
 через дистанцию слияния. Предиктор merge_frac_1chunk=0.0 — false negative:
 слияния на дистанции >1 чанка 1-чанк пробой не видны (известный лимит).
+
+--- backends: CPU multicore + GPU-ниша (финал) ---
+trajpar/ (нативный Rust, std::thread, чанки + merge-детекция + enum-scan +
+serial fallback): fsm_lex 32MB 69->11.7ms (8T, 5.9x), sat_acc 4.7x,
+adpcm_leaky 4.7x, audio_chain 4.9x; IMA ADPCM/hash_chain честный
+serial(wall). CPU — практический дефолт.
+wasm_metal правки: checkpoint-ядра (лейн стопится на совпадении со
+sweep-1 траекторией), interleaved layout (TR/TO remap), aligned 32-bit
+ld/st, probe3 на Kp<K, ленивый merge-предиктор (только после 2-го свипа).
+Аудио 16M: 238->25ms wall. Z2 enum-регрессия 136ms ушла -> 26.7ms.
+gpu_step.py — узкий GPU-фронтенд: шаг пишется в MSL (~10 строк), рантайм
+даёт спекуляцию + чекпойнты + interleave + склейку выходов по mq
+(merge-индекс, без отдельного output-pass). Баги по пути: s_out при
+раннем выходе = состояние выхода, не конец (фиксим where(mq==L,..) на
+хосте); ck-слот слияния не перезаписывается (q < mq//M - 1).
+Итог M1, бит-точно vs нативного Rust: fsm_lex 32MB serial 101ms /
+CPU 8T 11.7ms / WASM-Metal 21ms / gpu_step 7.4ms (2 раунда) — GPU
+выигрывает. audio 16M f32: serial 44ms / 8T 8.4ms / WASM 25ms /
+gpu_step 14.2ms — CPU-8T выигрывает (5 f32-полей, merge ~5000 итер).
+Ниша GPU: быстро-сливающееся состояние + тривиальное тело шага +
+желательно GPU-резидентные данные.
