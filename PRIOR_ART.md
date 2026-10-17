@@ -1,5 +1,45 @@
 # PRIOR_ART — что уже построено вокруг этой идеи
 
+## Update: раунд 2 под `trajrun` (step.c → CPU/GPU бинарь)
+
+Второй проход субагентов с продуктовым вопросом: «есть ли отгруженный
+инструмент, принимающий произвольный step s[t+1]=f(s[t],x[t])?»
+
+**Прод-инстансы нашего алгоритма (все домен-зашиты):**
+- cuDF CSV reader (PR #5024): перебор всех стартовых состояний
+  quote-FSM на 16KB-блок + сплейс — дословно наша схема, |Q|=4.
+- cuDF `io::fst` / ParPaRaw (VLDB'20): переходные функции Q→Q через
+  ассоциативный скан = наш EnumScan, в проде, 14.2 GB/s.
+- rapidgzip: спекулятивный DEFLATE по чанкам, ресинхронизация = merge.
+- DuckDB/ClickHouse/Mison/Pison/cuJSON/SpecProto(ASPLOS'26): та же семья.
+- SpecProto — самый опасный сосед: компилятор схемы → спекулятивный
+  параллельный декодер. PDF не проверен: если принимает произвольные
+  decode-циклы, наша новизна = только инженерия.
+
+**Ближайший общий инструмент: XBraid/MGRIT (LLNL)** — пользовательский
+stepper + parallel-in-time. Но MPI, сходимость до ε (не бит-точно),
+нет merge-detection/enum-фолбэка/wall-вердикта.
+
+**Квант-тулинг — серийный (проверено):** kdb+ scan/over/ema — serial
+(нет даже в списке MT-примитивов 4.0), pandas `_libs/window/aggregations`
+— серийный Cython-цикл, polars ewm_mean — серийный итератор, Numba
+отвергает loop-carried. cuDF EWMA = bespoke associative-rewrite,
+не бит-точен (NaN-баг в PR#9027 — аргумент за bit-exact merge).
+
+**GPU-автоматы:** GSpecPal (IPDPS'22) — ближайший фреймворк, но enumerable
+state; ngAP/AsyncAP/ANG — NFA-параллелизм по состояниям, не по позициям.
+Metal: metal-json (полный JSON-пайплайн на Metal, доменный); важно:
+Apple GPU без forward-progress guarantee — decoupled-lookback небезопасен.
+
+**Итог:** «speculative chunk + merge + fixup» — зрелая техника, но только
+на конечных перечислимых состояниях или в точечных продуктах. Наша
+конъюнкция (неперечислимое состояние → эмпирический merge, бит-точность,
+step.c → CPU+Metal, wall-вердикт) — свободна. Обязательные цитаты при
+публикации: Mytkowicz'14, Zhao&Shen'14/'15, Jiang&Agrawal'17, Xia'20,
+GSpecPal'22, ParPaRaw'20, Ge'19, SpecProto'26, XBraid, DEER/ELK.
+
+---
+
 Пять направлений ресёрча (параллельные субагенты, декабрь 2025):
 parallel-in-time lineage · спекуляция в железе/компиляторах ·
 GPU-исполнители программ · параллельные энтропийные кодеки ·
