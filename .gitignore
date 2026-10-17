@@ -5,3 +5,4 @@ wasm-progs/target/
 .DS_Store
 *.wasm
 !wasm-progs/**/*.wasm
+trajpar/target/

@@ -1,0 +1,11 @@
+[package]
+name = "trajpar"
+version = "0.1.0"
+edition = "2021"
+description = "Speculative multicore execution of sequential trajectories s[t+1]=f(s[t],x[t]) with merge detection; bit-exact"
+license = "MIT"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
