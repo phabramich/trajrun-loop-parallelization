@@ -1049,7 +1049,8 @@ fn usage() -> ! {
     eprintln!(
         "usage: trajrun <step.c> <in.bin> <out.bin> [--cpu [N]|--gpu] [--lanes C]
                 [--verify|--no-verify]
-        trajrun --check <step.c> [in.bin]"
+        trajrun --check <step.c> [in.bin]
+        trajrun --serve <step.c> [--cpu N|--gpu]   # \"in.bin out.bin\" lines on stdin"
     );
     std::process::exit(2)
 }
@@ -1087,6 +1088,67 @@ fn probe_merge(d: &Dylib, spec: &Spec, bytes: &[u8]) -> String {
     }
 }
 
+/// Repeat-call mode: `trajrun --serve step.c [--cpu N|--gpu]` reads
+/// "in.bin out.bin" lines on stdin and answers "ok <status> <ms>" per job.
+/// The dylib / Metal kernels are built once — this is where the GPU path
+/// actually wins, since per-call JIT+I/O stop dominating.
+fn serve_loop(spec: &Spec, threads: usize, gpu_flag: bool,
+             verify: Option<bool>) -> Result<(), String> {
+    use std::io::{BufRead, Write};
+    let d = build_dylib(spec)?;
+    #[cfg(target_os = "macos")]
+    let mut eng: Option<(usize, gpu::Engine)> = None;
+    let mut aff: Option<Option<Mat>> = None;
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    for line in stdin.lock().lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        let mut it = line.split_whitespace();
+        let (inp, outp) = match (it.next(), it.next()) {
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
+        };
+        let mut job = || -> Result<String, String> {
+            let bytes = fs::read(inp).map_err(|e| format!("{inp}: {e}"))?;
+            let t0 = Instant::now();
+            #[cfg(target_os = "macos")]
+            if gpu_flag {
+                let n = bytes.len() / spec.x.sz();
+                let want = n * spec.y.sz();
+                if aff.is_none() {
+                    aff = Some(detect_affine(&d, spec, &bytes));
+                }
+                if eng.as_ref().map(|(en, _)| *en) != Some(n) {
+                    eng = Some((n, gpu::Engine::new(spec, n, 8192)?));
+                }
+                let mut out = Vec::new();
+                match eng.as_ref().unwrap().1.run(spec, &bytes, &mut out, 64,
+                                                  aff.as_ref().unwrap().as_ref()) {
+                    Ok(r) => {
+                        out.truncate(want);
+                        fs::write(outp, &out).map_err(|e| format!("{outp}: {e}"))?;
+                        return Ok(format!("gpu {r} rounds {:.1}ms",
+                                          t0.elapsed().as_secs_f64() * 1e3));
+                    }
+                    Err(e) => eprintln!("gpu: {e} — cpu fallback"),
+                }
+            }
+            let _ = gpu_flag;
+            let (out, st) = run_cpu(&d, spec, &bytes, threads,
+                                    verify.unwrap_or(false))?;
+            fs::write(outp, &out).map_err(|e| format!("{outp}: {e}"))?;
+            Ok(format!("cpu {st} {:.1}ms", t0.elapsed().as_secs_f64() * 1e3))
+        };
+        let msg = match job() {
+            Ok(m) => format!("ok {m}"),
+            Err(e) => format!("err {e}"),
+        };
+        writeln!(stdout.lock(), "{msg}").map_err(|e| e.to_string())?;
+        stdout.lock().flush().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() {
@@ -1095,6 +1157,7 @@ fn main() -> Result<(), String> {
     let mut gpu = false;
     let mut cpu = false;
     let mut check = false;
+    let mut serve = false;
     let mut verify: Option<bool> = None;
     let mut lanes = 8192usize;
     let mut threads = std::thread::available_parallelism().map_or(1, |n| n.get());
@@ -1111,6 +1174,7 @@ fn main() -> Result<(), String> {
                 }
             }
             "--check" => check = true,
+            "--serve" => serve = true,
             "--verify" => verify = Some(true),
             "--no-verify" => verify = Some(false),
             "--lanes" => {
@@ -1154,6 +1218,9 @@ fn main() -> Result<(), String> {
             eprintln!("check: compile ok (no input given — skipped probe)");
         }
         return Ok(());
+    }
+    if serve {
+        return serve_loop(&spec, threads, gpu, verify);
     }
 
     let inp = pos.get(1).ok_or_else(|| "missing in.bin".to_string())?;
