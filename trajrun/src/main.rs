@@ -229,6 +229,7 @@ fn parse_spec(src: &str) -> Result<Spec, String> {
 const PRELUDE: &str = r#"
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 typedef uint32_t u32; typedef int32_t i32; typedef uint8_t u8;
 typedef unsigned char uchar;
 static inline float u2f(uint32_t u){float f;memcpy(&f,&u,4);return f;}

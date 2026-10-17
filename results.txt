@@ -225,3 +225,11 @@ OOB-коррупция всей GPU-динамики; cc дефолтит gnu++9
 Замеры (32MB fsm / 16M f32 audio, wall, M1): cpu-1 76/172ms, cpu-8T
 25/37ms, gpu 101/127ms (≈50ms Metal JIT + ≈40ms I/O + ~10-15ms compute).
 GPU-выигрыш в чистом вычислении; per-invocation JIT съедает разовые запуски.
+--- trajrun recon: real-workload probes (256MB-ish inputs, M1) ---
+csv_bounds 200MB RFC4180 : serial 361ms / 8T 97ms (3.7x) / GPU 484ms; merge ~1 step
+utf8_check 100MB         : serial 192ms / 8T 47ms (4.1x) / GPU 217ms; merge ~1 step
+  (sticky "bad" flag in state broke merges -> emit per-byte validity, AND-reduce)
+fm_rx 256MB IQ->FM+PLL   : serial 534ms / 8T 92ms (5.8x) / GPU 381ms; merge ~162 steps
+ewma_risk 256MB RiskMetrics: serial 645ms / 8T 131ms (4.9x) / GPU 706ms (6 rounds);
+  merge ~23.4K steps (slow var loop lambda=0.999) -> CPU-friendly, GPU borderline
+fix: added math.h to CPU prelude (sqrtf etc. now usable in step.c)
