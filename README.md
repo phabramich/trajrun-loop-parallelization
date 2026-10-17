@@ -1,5 +1,37 @@
 # Trajectory-parallel execution of sequential programs
 
+**Write 15 lines of C describing one step `s[t+1] = f(s[t], x[t])` —
+get a single binary that runs it in parallel on multicore CPU or Apple
+Metal, bit-exact vs serial, or honestly reports a wall.**
+
+## The product: `trajrun/`
+
+```bash
+cd trajrun && cargo build --release
+./target/release/trajrun examples/csv_bounds.c big.csv bounds.bin --cpu 8
+./target/release/trajrun --check examples/fm_rx.c iq.bin   # speculative or wall?
+```
+
+You write a scalar step function over a small state struct; `trajrun`
+compiles it to a native dylib (CPU) or embeds it in generated Metal
+kernels (GPU), then runs the trajectory speculatively: chunks execute in
+parallel from guessed boundary states, and wherever a wrong guess
+**merges** with the true trajectory the chunk is free. What never merges
+(hash chains, non-contracting codecs) is reported as `wall`, not faked.
+
+Measured on M1 (200–256MB inputs): CSV record bounds **3.7×**, UTF-8
+validation **4.1×**, FM-receiver IQ chain **5.8×**, EWMA risk filter
+**4.9×** on 8 CPU threads — all bit-exact. GPU wins on repeated calls or
+GPU-resident data. See `trajrun/README.md`.
+
+Prior art: this generalizes the FSM-speculation line (Mytkowicz'14,
+GSpecPal'22, ParPaRaw/cuDF'20 — all enumerable-state) to **opaque state**
+where merges can only be detected empirically. Map: `PRIOR_ART.md`.
+
+---
+
+## The research pipeline behind it
+
 **Compiles a sequential Rust → WASM loop into a native Apple Metal kernel
 and executes its trajectory `s[t+1] = f(s[t], x[t])` in parallel — bit-exact,
 or it honestly reports a wall.**
@@ -107,6 +139,9 @@ out, info = run_wasm("p.wasm", "my_alg", data, extra_args=(97,))
 ## Repo map
 
 ```
+trajrun/         the product: step.c -> multicore CPU or Metal GPU, one
+                 binary, examples/ (csv_bounds, utf8_check, fm_rx,
+                 ewma_risk, audio_chain, fsm)
 wasm_load.py     WASM decoder -> flat pc-indexed program; `call` handled by
                  bytecode-level inlining (recursion/call_indirect rejected)
 vm_ref.py        scalar reference interpreter — the correctness oracle
