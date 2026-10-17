@@ -197,3 +197,27 @@ pub extern "C" fn call_test(input: *const u8, n_bytes: usize, out: *mut u8) -> u
     }
     n_bytes
 }
+
+/// Реальная DSP-цепочка (аналог `ffmpeg -af highpass,acompressor`):
+/// HP80 -> HP30 -> peak-hold envelope (VU) -> gain -> out. Четыре
+/// carried f32-аккумулятора; все полюса |lambda| < 1 => сжатие.
+#[no_mangle]
+pub extern "C" fn audio_chain(input: *const u8, n_bytes: usize, out: *mut u8) -> usize {
+    let n = n_bytes / 4;
+    let (mut y1, mut x1) = (0f32, 0f32);
+    let (mut y2, mut x2) = (0f32, 0f32);
+    let mut env = 0f32;
+    let mut i: usize = 0;
+    while i < n {
+        let x = f32::from_bits(unsafe { (input as *const u32).add(i).read() });
+        let a = x - x1 + 0.9886 * y1; x1 = x; y1 = a;
+        let b = a - x2 + 0.9957 * y2; x2 = a; y2 = b;
+        let m = if b < 0.0 { -b } else { b };
+        env = if m > env { m } else { env * 0.995 };
+        let g = if env > 0.5 { 0.5 / env } else { 1.0 };
+        let o = b * g;
+        unsafe { (out as *mut u32).add(i).write(o.to_bits()) };
+        i += 1;
+    }
+    n * 4
+}

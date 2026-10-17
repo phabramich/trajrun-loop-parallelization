@@ -181,3 +181,12 @@ wasm_load.inline_calls: call f -> `block` + пролог local.set (args со
 Локалы мерджатся; рекурсия и call_indirect — честный отказ.
 call_test (#[inline(never)] helper): [125, 0], бит-точно vs scalar и
 seqMetal. Главный пробел покрытия закрыт.
+
+--- реальная задача: audio_chain (HP80->HP30->peak-env->gain, ~ffmpeg -af) ---
+4 carried f32 (2x IIR + peak-hold env + gain). Все полюса |λ|<1 -> сжатие,
+merge distance ~5-9 чанков от самого медленного λ=0.9957.
+256K сэмплов: hist=[510..0] 10 свипов, бит-точно vs scalar и seqMetal.
+8M сэмплов (~3мин аудио, 62.9M шагов): seq Metal 1752ms vs Jacobi(8192
+лейнов) 119ms = **14.7x**, бит-точно. Плато ~6400 в hist — волновой фронт
+через дистанцию слияния. Предиктор merge_frac_1chunk=0.0 — false negative:
+слияния на дистанции >1 чанка 1-чанк пробой не видны (известный лимит).
