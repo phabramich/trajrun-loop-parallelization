@@ -51,6 +51,13 @@ data lives and how much codegen you want:
 | `audio_chain` 16M f32 | 41–44 ms | **8.4 ms** | 25 ms | 14.2 ms |
 | IMA ADPCM encoded audio | 83 ms | 83 ms (wall) | wall | — |
 
+- **`trajrun/`** — single binary, zero deps at runtime:
+  `trajrun step.c in.bin out.bin [--cpu N|--gpu]`. Your step is plain C:
+  `typedef struct { float y1, x1, env; } S; float step(S *s, float x){…}`.
+  CPU: compiled to a dylib (`cc`, batch loop → native speed) and run
+  multicore; GPU: the same source is wrapped in the speculative Metal
+  kernel — the Metal JIT ships with macOS, no toolchain needed.
+  `trajrun --check step.c in.bin` predicts speculative vs wall upfront.
 - **`trajpar/`** — native Rust crate, `std::thread` multicore, speculative
   chunks + merge detection + finite-domain scan, exact serial fallback.
   *The default choice*: no codegen, no GPU, 4–6× over serial on
@@ -65,7 +72,9 @@ data lives and how much codegen you want:
 
 GPU wins only when the state merges fast relative to input size and the
 per-step body is trivial; CPU-8T wins on slower-merging f32 state; walls
-are walls everywhere.
+are walls everywhere. For one-shot `trajrun` calls the ~40–60 ms Metal
+source-JIT plus file I/O dominate — the GPU win is real for
+repeated/GPU-resident workloads, less so for single files.
 
 ## Quickstart
 

@@ -211,3 +211,17 @@ CPU 8T 11.7ms / WASM-Metal 21ms / gpu_step 7.4ms (2 раунда) — GPU
 gpu_step 14.2ms — CPU-8T выигрывает (5 f32-полей, merge ~5000 итер).
 Ниша GPU: быстро-сливающееся состояние + тривиальное тело шага +
 желательно GPU-резидентные данные.
+
+--- trajrun: один бинарь, step.c фронтенд ---
+trajrun/ (metal-rs + libloading, ~900 строк): step.c (typedef struct S +
+step fn) → --cpu: cc -x c++ -O2 -shared -> dlopen -> батчевый traj_run на
+чанк + серийная склейка через traj_step (только merge-дистанция);
+--gpu: тот же исходник в MSL-обёртку (S* -> thread S*, fast_math OFF,
+чекпойнты + mq-склейка + GPU-транспонёр). --check: компиляция + merge-
+проба. Стены: не-литеральный init, i64/f64, OOB -> честная ошибка/фолбэк.
+Баги по пути: [[threads_per_grid]] != C в хелпер-ядрах (32M vs 8192) —
+OOB-коррупция всей GPU-динамики; cc дефолтит gnu++98 (-std=c++17);
+пустой ys_bytes до set_len; verify читал u8-вход как u32-слова.
+Замеры (32MB fsm / 16M f32 audio, wall, M1): cpu-1 76/172ms, cpu-8T
+25/37ms, gpu 101/127ms (≈50ms Metal JIT + ≈40ms I/O + ~10-15ms compute).
+GPU-выигрыш в чистом вычислении; per-invocation JIT съедает разовые запуски.

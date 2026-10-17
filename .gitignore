@@ -6,3 +6,4 @@ wasm-progs/target/
 *.wasm
 !wasm-progs/**/*.wasm
 trajpar/target/
+trajrun/target/
