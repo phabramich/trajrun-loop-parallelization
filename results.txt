@@ -233,3 +233,6 @@ fm_rx 256MB IQ->FM+PLL   : serial 534ms / 8T 92ms (5.8x) / GPU 381ms; merge ~162
 ewma_risk 256MB RiskMetrics: serial 645ms / 8T 131ms (4.9x) / GPU 706ms (6 rounds);
   merge ~23.4K steps (slow var loop lambda=0.999) -> CPU-friendly, GPU borderline
 fix: added math.h to CPU prelude (sqrtf etc. now usable in step.c)
+ndjson 1GiB record bounds : serial 1570ms / 8T 574ms (2.7x) / GPU 5072ms (5 rounds); merge ~212 steps; GPU bit-exact
+lcg 64MB u8 LCG          : wall -> AFFINE Z/2^32: 8T 227ms (2 exact passes) / GPU 2 rounds; bit-exact
+acc_acc 256MB u32 integ. : affine exact scan, 8T 343ms

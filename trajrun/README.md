@@ -50,7 +50,14 @@ Output file gets one `Y` per input element.
 Speculation works when chunk trajectories **merge** — a run started from a
 wrong boundary state converges to the true state within the chunk
 (synchronizing FSMs, contracting IIR/EWMA/PLL loops, resynchronizing codes).
-Hash chains and VDFs never merge → reported `wall`, not faked.
+A second, auto-detected path covers **Z/2^32-affine steps** (`f = A·s + b(x)`:
+LCGs, integrators, counters) — they never merge, but chunk maps compose
+exactly, so `trajrun` computes every true boundary state and runs two exact
+parallel passes. Anything else → reported `wall`, not faked.
+
+`--serve step.c --gpu` reads `(in.bin, out.bin)` job lines on stdin — the
+dylib and Metal kernels are built once, so per-call JIT stops dominating.
+That is where the GPU path is meant to be used.
 
 ## Measured (M1, wall-clock incl. file I/O)
 
@@ -62,6 +69,8 @@ Hash chains and VDFs never merge → reported `wall`, not faked.
 | `fm_rx.c` IQ→FM+PLL | 256MB | 534 ms | **92 ms** | 381 ms | ~162 steps |
 | `ewma_risk.c` RiskMetrics | 256MB | 645 ms | **131 ms** | 706 ms | ~23K steps |
 | `audio_chain.c` IIR+env | 16M f32 | 172 ms | **37 ms** | 127 ms | slow |
+| `ndjson.c` record bounds | 1GiB | 1570 ms | **574 ms** | 5072 ms | ~212 steps |
+| `lcg.c` LCG PRNG | 64MB u8 | was `wall` | **227 ms** (affine) | 918 ms (2 rounds) | never merges |
 
 GPU wall is dominated by ~50ms Metal source JIT + file I/O; it wins only on
 repeated calls or GPU-resident data. CPU-8T is the default for a reason.
