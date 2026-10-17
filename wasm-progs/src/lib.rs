@@ -176,3 +176,24 @@ pub extern "C" fn float_leak(input: *const u8, n_bytes: usize, out: *mut u8) -> 
     }
     n_bytes
 }
+
+/// Проверка инлайнинга call: хеллер без inline (rustc эмитит настоящий
+/// call 0x10). Контрактивная динамика: st = (st + class(x)) & 7 с reset.
+#[inline(never)]
+fn nib_class(v: u8) -> u32 {
+    ((v.wrapping_mul(73) >> 5) & 7) as u32
+}
+
+#[no_mangle]
+pub extern "C" fn call_test(input: *const u8, n_bytes: usize, out: *mut u8) -> usize {
+    let mut st: u32 = 0;
+    let mut i: usize = 0;
+    while i < n_bytes {
+        let c = unsafe { *input.add(i) };
+        let cls = nib_class(c);
+        st = if cls == 7 { 0 } else { (st + cls) & 7 };
+        unsafe { *out.add(i) = ((st << 4) | cls) as u8 };
+        i += 1;
+    }
+    n_bytes
+}

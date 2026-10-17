@@ -779,7 +779,8 @@ def main():
     #    переменная длина итерации) и float_leak (f32 + trunc_sat, IIR
     #    lambda=7/8). Эталон — скалярный vm_ref.
     for fn, sz, C, K in [("nibble_fsm", 8192, 128, 64),
-                         ("float_leak", 8192, 128, 64)]:
+                         ("float_leak", 8192, 128, 64),
+                         ("call_test", 8192, 128, 64)]:
         vm_n = MetalWasmVM(Program(mod, fn), fn)
         dat = bytes(rng.randrange(256) for _ in range(sz))
         mem_n = make_memory(mod, [(IN_ADDR, dat),

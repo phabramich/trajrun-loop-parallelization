@@ -174,3 +174,10 @@ Benchmark (C=1024 chunks on Apple Metal vs 1-thread same Metal kernel):
 5. Negative result kept for the record: Anderson acceleration hurt the
    discrete FSM case (5->9 sweeps) -- linear mixing injects invalid
    automaton states; left off by default (reverted in 6013741).
+
+--- call-инлайнинг (байткод-уровень, до decode) ---
+wasm_load.inline_calls: call f -> `block` + пролог local.set (args со
+стека) + тело callee (local.* +base, return -> br depth) + `end`.
+Локалы мерджатся; рекурсия и call_indirect — честный отказ.
+call_test (#[inline(never)] helper): [125, 0], бит-точно vs scalar и
+seqMetal. Главный пробел покрытия закрыт.

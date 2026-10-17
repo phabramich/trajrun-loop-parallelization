@@ -126,6 +126,122 @@ def _sleb(b, p, bits=64):
             return r, p
 
 
+def _uleb_enc(v):
+    out = bytearray()
+    while True:
+        x = v & 0x7F; v >>= 7
+        out.append(x | (0x80 if v else 0))
+        if not v:
+            return bytes(out)
+
+
+def _func_locals(mod, fidx):
+    """(nparams, n_declared_locals, offset_инструкций) для функции fidx."""
+    nparams = len(mod.params[mod.funcs[fidx]])
+    body = mod.code[fidx]
+    nl, p = _uleb(body, 0)
+    nloc = 0
+    for _ in range(nl):
+        cnt, p = _uleb(body, p)
+        p += 1                      # type byte
+        nloc += cnt
+    return nparams, nloc, p
+
+
+def _rewrite(mod, fidx, base, visiting, as_callee):
+    """Тело fidx без locals-decls и без финального end, с инлайненными
+    call'ами. Локалы смещены на +base. Возвращает (bytes, n_slots):
+    n_slots = сколько слотов локалов занято начиная с base.
+    as_callee=True: `return` -> `br k` на конец обёртки-инлайна."""
+    if fidx in visiting:
+        raise NotImplementedError("recursive call — unsupported")
+    nparams, nloc, p = _func_locals(mod, fidx)
+    body = mod.code[fidx]
+    out = bytearray()
+    depth = 0                        # вложенность блоков внутри тела
+    next_free = base + nparams + nloc
+    while p < len(body):
+        op = body[p]; p += 1
+        if op == 0xFC:               # префикс trunc_sat: копируем sub-uleb
+            out.append(op)
+            v, p = _uleb(body, p)
+            out += _uleb_enc(v)
+            continue
+        if op == 0x10:               # call -> block + prologue + callee + end
+            gidx, p = _uleb(body, p)
+            np2 = len(mod.params[mod.funcs[gidx]])
+            base2 = next_free
+            inner, used = _rewrite(mod, gidx, base2,
+                                   visiting | {fidx}, as_callee=True)
+            next_free = base2 + used
+            out += b"\x02\x40"       # block (void)
+            for i in range(np2 - 1, -1, -1):
+                out += b"\x21" + _uleb_enc(base2 + i)   # local.set arg
+            out += inner
+            out += b"\x0b"           # end
+            continue
+        if op == 0x11:
+            raise NotImplementedError("call_indirect — unsupported")
+        if op == 0x0F:               # return
+            if as_callee:
+                out += b"\x0c" + _uleb_enc(depth)   # br depth -> обёртка
+            else:
+                out.append(op)
+            continue
+        if op in (0x02, 0x03, 0x04):  # block/loop/if: depth++ , bt копируем
+            out.append(op)
+            out.append(body[p]); p += 1
+            depth += 1
+            continue
+        if op == 0x0B:               # end
+            if depth == 0:           # финальный end функции — стрипаем
+                break
+            depth -= 1
+            out.append(op)
+            continue
+        if op in (0x20, 0x21, 0x22):  # local.get/set/tee: remap + base
+            idx, p = _uleb(body, p)
+            out.append(op)
+            out += _uleb_enc(idx + base)
+            continue
+        # остальные: копируем op + immediates по типу
+        nm, ik, _, _ = OPS[op]
+        out.append(op)
+        if ik == "u32" or ik in ("i32", "i64"):
+            p0 = p
+            _, p = _uleb(body, p)
+            out += body[p0:p]
+        elif ik == "f32":
+            out += body[p:p + 4]; p += 4
+        elif ik == "f64":
+            out += body[p:p + 8]; p += 8
+        elif ik == "bt":
+            out.append(body[p]); p += 1
+        elif ik == "mem":
+            for _ in range(2):
+                p0 = p
+                _, p = _uleb(body, p)
+                out += body[p0:p]
+        elif ik == "table":
+            nt, p2 = _uleb(body, p)
+            out += _uleb_enc(nt)
+            p = p2
+            for _ in range(nt + 1):
+                p0 = p
+                _, p = _uleb(body, p)
+                out += body[p0:p]
+    return bytes(out), next_free - base
+
+
+def inline_calls(mod, fidx):
+    """Полное тело функции (decls + instrs + end) со всеми call
+    проинлайненными рекурсивно."""
+    instrs, used = _rewrite(mod, fidx, 0, frozenset(), as_callee=False)
+    nparams, _, _ = _func_locals(mod, fidx)
+    decls = _uleb_enc(1) + _uleb_enc(used - nparams) + b"\x7f"  # все i32
+    return decls + instrs + b"\x0b"
+
+
 class Module:
     def __init__(self, path):
         b = open(path, "rb").read()
@@ -204,7 +320,10 @@ def decode(mod, name):
     if = else-target; else = after-end; всё прочее = исходный imm.
     depth[pc] = статическая глубина стека ДО инструкции.
     """
-    body = mod.code[mod.exports[name]]
+    fidx = mod.exports[name]
+    body = mod.code[fidx]
+    if b"\x10" in body:                 # есть call-байт -> инлайним
+        body = inline_calls(mod, fidx)
     nl, p = _uleb(body, 0)
     nloc = 0
     for _ in range(nl):
