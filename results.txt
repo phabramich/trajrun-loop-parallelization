@@ -137,3 +137,40 @@ Benchmark (C=1024 chunks on Apple Metal vs 1-thread same Metal kernel):
        Jacobi -> wavefront +1/sweep (WALL)
   [4b] adpcm_leaky G.726 style (lambda=15/16, 31.2M steps):
        Jacobi 2 sweeps, bit-exact=True | 1-thr 80.93ms vs 1024-thr 3.71ms (21.84x)
+
+=== Update: event-based chunking, auto-EnumScan, opcode coverage ===
+
+1. Back-edge iteration counting (root fix for variable-length bodies).
+   Chunk = K loop iterations (counted inside emitted br/br_if -> loop_pc),
+   not K instructions. Boundaries are always at the loop header (depth=0),
+   so pc never drifts: Jacobi heals on br_table/variable-length bodies,
+   and enum tuples shrink (pc constant). Verified on nibble_fsm
+   (br_table + i32.rem_u, per-arm path lengths differ): [126, 0], bit-exact.
+
+2. run_auto: probe3 -> Jacobi -> on stagnation auto-enumerate OBSERVED
+   state tuples (pc + dynamic locals, additive deltas for linear locals
+   via semidirect product), feed real exits back, let Jacobi certify.
+   - Z_2 quote FSM (no hints): [958, 551, 551, 0], bit-exact, |S|=41.
+   - Honest wall when domains don't close (ADPCM/hash).
+   - Predictor (1 extra rollout on first bad sweep): perturb only
+     carried cols (exit-entry delta non-constant) -> merge_frac; 0 means
+     "no healing in-chunk" -> enum immediately; >0 means Jacobi viable.
+     False-negative sources fixed: compare exits against E_np (aligned),
+     never perturb counters/params (constant exit-entry delta).
+
+3. Opcode coverage: br_table (parser cursor bug fixed + MSL switch),
+   f32 arithmetic/comparisons/conversions incl. 0xFC trunc_sat
+   (rustc `as u8`), spec-correct opcode table (i64 cmp 0x50, f32 cmp
+   0x5B, f32/f64 arith blocks). float_leak (f32 IIR lambda=7/8):
+   [126,125,4,0] bit-exact vs scalar AND sequential Metal.
+   Deferred honestly: call/call_indirect (needs frames or inlining),
+   f64 arithmetic (decoded, no u64 stack slots), i64 arith same.
+
+4. Threadgroup input cache: SKIPPED after measurement. Kernel is
+   dispatch-bound: ~260 MB/s input reads vs ~200 GB/s available (0.1%);
+   lanes stream disjoint input regions -> zero reuse by construction.
+   A shared-memory stage cannot help either property.
+
+5. Negative result kept for the record: Anderson acceleration hurt the
+   discrete FSM case (5->9 sweeps) -- linear mixing injects invalid
+   automaton states; left off by default (reverted in 6013741).

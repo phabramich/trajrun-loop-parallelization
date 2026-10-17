@@ -115,6 +115,35 @@ pub extern "C" fn sat_acc(input: *const i16, n: usize, out: *mut i32) -> usize {
     n
 }
 
+/// Ниббл-автомат с match-диспетчеризацией (16 плотных рукавов -> br_table)
+/// и переменным модулем (-> i32.rem_u). Carried: st + acc.
+/// Класс символа определяет переход; синхронизирующий класс 15 -> st=0
+/// из любого состояния.
+#[no_mangle]
+pub extern "C" fn nibble_fsm(input: *const u8, n_bytes: usize, out: *mut u8,
+                             modulus: u32) -> usize {
+    let mut st: u32 = 0;
+    let mut acc: u32 = 0;
+    let m = if modulus == 0 { 1 } else { modulus };
+    let mut i: usize = 0;
+    while i < n_bytes {
+        let b = unsafe { *input.add(i) } as u32;
+        let nib = b & 15;
+        // match на 16 плотных значений -> rustc сгенерирует br_table
+        let cls: u32 = match nib {
+            0 => 15, 1 => 0, 2 => 1, 3 => 0, 4 => 2, 5 => 0, 6 => 3,
+            7 => 0, 8 => 4, 9 => 0, 10 => 5, 11 => 0, 12 => 6, 13 => 0,
+            14 => 7, 15 => 15,
+            _ => 0,
+        };
+        if cls == 15 { st = 0; acc = 0 } else { st = (st + cls) & 7 };
+        acc = (acc * 33 + nib) % m;
+        unsafe { *out.add(i) = ((st << 4) | (acc & 15)) as u8 };
+        i += 1;
+    }
+    n_bytes
+}
+
 /// Мультипликативная хеш-цепочка: h carried, ошибка не затухает никогда.
 /// Честная стена — контрольный эксперимент.
 #[no_mangle]
@@ -127,6 +156,22 @@ pub extern "C" fn hash_chain(input: *const u8, n_bytes: usize, out: *mut u8) -> 
         h = h.wrapping_mul(16777619);
         h ^= h >> 13;
         unsafe { *out.add(i) = (h >> 24) as u8 };
+        i += 1;
+    }
+    n_bytes
+}
+
+/// f32 IIR-фильтр: y = 0.875*y + x — контрактивная динамика на f32
+/// (lambda = 7/8). Покрывает f32.mul/add/convert/trunc_sat/store.
+#[no_mangle]
+pub extern "C" fn float_leak(input: *const u8, n_bytes: usize, out: *mut u8) -> usize {
+    let mut y: f32 = 0.0;
+    let mut i: usize = 0;
+    while i < n_bytes {
+        let x = unsafe { *input.add(i) } as f32;
+        y = y * 0.875 + x;
+        let v = if y > 255.0 { 255.0 } else if y < 0.0 { 0.0 } else { y };
+        unsafe { *out.add(i) = v as u8 };
         i += 1;
     }
     n_bytes

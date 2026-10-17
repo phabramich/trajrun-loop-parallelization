@@ -46,24 +46,60 @@ for i, nm in enumerate(["i32.eqz", "i32.eq", "i32.ne", "i32.lt_s",
                         "i32.lt_u", "i32.gt_s", "i32.gt_u", "i32.le_s",
                         "i32.le_u", "i32.ge_s", "i32.ge_u"]):
     _op(0x45 + i, nm, None, 1 if nm == "i32.eqz" else 2, 1)
+for i, nm in enumerate(["i64.eqz", "i64.eq", "i64.ne", "i64.lt_s",
+                        "i64.lt_u", "i64.gt_s", "i64.gt_u", "i64.le_s",
+                        "i64.le_u", "i64.ge_s", "i64.ge_u"]):
+    _op(0x50 + i, nm, None, 1 if nm == "i64.eqz" else 2, 1)
 for i, nm in enumerate(["f32.eq", "f32.ne", "f32.lt", "f32.gt", "f32.le",
                         "f32.ge", "f64.eq", "f64.ne", "f64.lt", "f64.gt",
                         "f64.le", "f64.ge"]):
-    _op(0x50 + i, nm, None, 2, 1)
+    _op(0x5B + i, nm, None, 2, 1)
 for i, nm in enumerate(["i32.clz", "i32.ctz", "i32.popcnt", "i32.add",
                         "i32.sub", "i32.mul", "i32.div_s", "i32.div_u",
                         "i32.rem_s", "i32.rem_u", "i32.and", "i32.or",
                         "i32.xor", "i32.shl", "i32.shr_s", "i32.shr_u",
                         "i32.rotl", "i32.rotr"]):
     _op(0x67 + i, nm, None, 1 if i < 3 else 2, 1)
+for i, nm in enumerate(["i64.clz", "i64.ctz", "i64.popcnt", "i64.add",
+                        "i64.sub", "i64.mul", "i64.div_s", "i64.div_u",
+                        "i64.rem_s", "i64.rem_u", "i64.and", "i64.or",
+                        "i64.xor", "i64.shl", "i64.shr_s", "i64.shr_u",
+                        "i64.rotl", "i64.rotr"]):
+    _op(0x79 + i, nm, None, 1 if i < 3 else 2, 1)
+for i, nm in enumerate(["f32.abs", "f32.neg", "f32.ceil", "f32.floor",
+                        "f32.trunc", "f32.nearest", "f32.sqrt",
+                        "f32.add", "f32.sub", "f32.mul", "f32.div",
+                        "f32.min", "f32.max", "f32.copysign"]):
+    _op(0x8B + i, nm, None, 1 if i < 7 else 2, 1)
+for i, nm in enumerate(["f64.abs", "f64.neg", "f64.ceil", "f64.floor",
+                        "f64.trunc", "f64.nearest", "f64.sqrt",
+                        "f64.add", "f64.sub", "f64.mul", "f64.div",
+                        "f64.min", "f64.max", "f64.copysign"]):
+    _op(0x99 + i, nm, None, 1 if i < 7 else 2, 1)
 # конверсии, которые любит rustc
 for i, nm in enumerate(["i32.wrap_i64", "i32.trunc_f32_s", "i32.trunc_f32_u",
                         "i32.trunc_f64_s", "i32.trunc_f64_u", "i64.extend_i32_s",
-                        "i64.extend_i32_u"]):
+                        "i64.extend_i32_u", "i64.trunc_f32_s",
+                        "i64.trunc_f32_u", "i64.trunc_f64_s",
+                        "i64.trunc_f64_u", "f32.convert_i32_s",
+                        "f32.convert_i32_u", "f32.convert_i64_s",
+                        "f32.convert_i64_u", "f32.demote_f64",
+                        "f64.convert_i32_s", "f64.convert_i32_u",
+                        "f64.convert_i64_s", "f64.convert_i64_u",
+                        "f64.promote_f32", "i32.reinterpret_f32",
+                        "i64.reinterpret_f64", "f32.reinterpret_i32",
+                        "f64.reinterpret_i64"]):
     _op(0xA7 + i, nm, None, 1, 1)
 
+# 0xFC-префикс: saturating trunc (rustc эмитит на `x as u8`-кастах)
+FC_OPS = {0: ("i32.trunc_sat_f32_s", None, 1, 1),
+          1: ("i32.trunc_sat_f32_u", None, 1, 1),
+          2: ("i32.trunc_sat_f64_s", None, 1, 1),
+          3: ("i32.trunc_sat_f64_u", None, 1, 1)}
+
 # синтетическая инструкция — не имеет wasm-опкода
-NAME_PP = {v[0]: (v[2], v[3]) for v in OPS.values()}
+NAME_PP = {v[0]: (v[2], v[3])
+           for v in list(OPS.values()) + list(FC_OPS.values())}
 NAME_PP["halt"] = (0, 0)
 NAME_PP["else"] = (0, 0)
 
@@ -184,7 +220,11 @@ def decode(mod, name):
     while p < len(body):
         pc = len(instrs)
         op = body[p]; p += 1
-        nm, ik, pop, push = OPS[op]
+        if op == 0xFC:
+            sub, p = _uleb(body, p)
+            nm, ik, pop, push = FC_OPS[sub]
+        else:
+            nm, ik, pop, push = OPS[op]
         imm = 0
         if ik == "u32":
             imm, p = _uleb(body, p)
@@ -207,7 +247,8 @@ def decode(mod, name):
             for _ in range(nt):
                 t, p = _uleb(body, p)
                 tgts.append(t)
-            imm = (tgts, _uleb(body, p)[0])
+            dflt, p = _uleb(body, p)
+            imm = (tgts, dflt)
 
         if nm in ("block", "loop", "if"):
             cstack.append(dict(kind=nm, head=pc, else_pc=None))

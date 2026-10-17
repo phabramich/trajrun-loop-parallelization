@@ -5,7 +5,8 @@
 храним как беззнаковые u32, знаковые интерпретируем по месту.
 """
 
-import math, random
+import math, random, struct
+import numpy as np
 from wasm_load import Module, decode, NAME_PP
 
 U32 = 0xFFFFFFFF
@@ -13,6 +14,14 @@ U32 = 0xFFFFFFFF
 
 def sx(v):          # u32 -> signed
     return v - 0x100000000 if v & 0x80000000 else v
+
+
+def b2f(v):         # u32 bits -> f32 (как np.float32 — одинарное округление)
+    return np.float32(struct.unpack("<f", struct.pack("<I", v))[0])
+
+
+def f2b(f):         # f32 -> u32 bits
+    return struct.unpack("<I", struct.pack("<f", float(np.float32(f))))[0]
 
 
 class Program:
@@ -67,6 +76,8 @@ class Program:
                 st[d - 3] = st[d - 3] if st[d - 1] != 0 else st[d - 2]
             elif nm == "i32.const":
                 st[d] = imm & U32
+            elif nm == "f32.const":
+                st[d] = f2b(imm)
             elif nm == "i64.const":
                 st[d] = imm & 0xFFFFFFFFFFFFFFFF
             elif nm.startswith("i32.load8_u"):
@@ -83,11 +94,12 @@ class Program:
                 a = st[d - 1] + imm
                 v = mem[a] | (mem[a + 1] << 8)
                 st[d - 1] = v | 0xFFFF0000 if v & 0x8000 else v
-            elif nm in ("i32.load",):
+            elif nm in ("i32.load", "f32.load"):
                 a = st[d - 1] + imm
                 st[d - 1] = (mem[a] | (mem[a + 1] << 8) |
                              (mem[a + 2] << 16) | (mem[a + 3] << 24))
-            elif nm.startswith("i32.store") or nm in ("i64.store",):
+            elif nm.startswith("i32.store") or nm in ("i64.store",
+                                                      "f32.store"):
                 a = st[d - 2] + imm
                 if log_stores:
                     stores.append((a, st[d - 1], nm))
@@ -138,6 +150,52 @@ class Program:
                     v = 32 if a == 0 else (a & -a).bit_length() - 1
                 elif nm == "i32.popcnt":
                     v = bin(a).count("1")
+                elif nm in ("f32.add", "f32.sub", "f32.mul", "f32.div",
+                            "f32.min", "f32.max", "f32.copysign"):
+                    fa, fb = b2f(a), b2f(b)
+                    if nm == "f32.add": r = fa + fb
+                    elif nm == "f32.sub": r = fa - fb
+                    elif nm == "f32.mul": r = fa * fb
+                    elif nm == "f32.div": r = fa / fb
+                    elif nm == "f32.min": r = np.minimum(fa, fb)
+                    elif nm == "f32.max": r = np.maximum(fa, fb)
+                    else: r = np.copysign(fa, fb)
+                    v = f2b(r)
+                elif nm in ("f32.eq", "f32.ne", "f32.lt", "f32.gt",
+                            "f32.le", "f32.ge"):
+                    fa, fb = b2f(a), b2f(b)
+                    if nm == "f32.eq": v = int(fa == fb)
+                    elif nm == "f32.ne": v = int(fa != fb)
+                    elif nm == "f32.lt": v = int(fa < fb)
+                    elif nm == "f32.gt": v = int(fa > fb)
+                    elif nm == "f32.le": v = int(fa <= fb)
+                    else: v = int(fa >= fb)
+                elif nm in ("f32.abs", "f32.neg", "f32.sqrt", "f32.ceil",
+                            "f32.floor", "f32.trunc", "f32.nearest"):
+                    fa = b2f(a)
+                    if nm == "f32.abs": r = np.abs(fa)
+                    elif nm == "f32.neg": r = np.float32(-fa)
+                    elif nm == "f32.sqrt": r = np.sqrt(fa)
+                    elif nm == "f32.ceil": r = np.ceil(fa)
+                    elif nm == "f32.floor": r = np.floor(fa)
+                    elif nm == "f32.trunc": r = np.trunc(fa)
+                    else: r = np.rint(fa)
+                    v = f2b(r)
+                elif nm == "i32.trunc_f32_s":
+                    v = int(np.trunc(b2f(a))) & U32
+                elif nm == "i32.trunc_f32_u" or nm == "i32.trunc_sat_f32_u":
+                    t = float(np.trunc(b2f(a)))
+                    v = int(min(max(t, 0.0), float(U32))) if not math.isnan(t) else 0
+                elif nm == "i32.trunc_sat_f32_s":
+                    t = float(np.trunc(b2f(a)))
+                    v = int(min(max(t, -2147483648.0), 2147483647.0)) \
+                        if not math.isnan(t) else 0
+                elif nm == "f32.convert_i32_s":
+                    v = f2b(np.float32(sx(a)))
+                elif nm == "f32.convert_i32_u":
+                    v = f2b(np.float32(a))
+                elif nm in ("f32.reinterpret_i32", "i32.reinterpret_f32"):
+                    v = a
                 else:
                     raise NotImplementedError(nm)
                 st[dst] = v & U32
