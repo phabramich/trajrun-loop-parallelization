@@ -7,3 +7,4 @@ wasm-progs/target/
 !wasm-progs/**/*.wasm
 trajpar/target/
 trajrun/target/
+trajrun-py/target/

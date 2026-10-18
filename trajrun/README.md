@@ -59,6 +59,18 @@ parallel passes. Anything else → reported `wall`, not faked.
 dylib and Metal kernels are built once, so per-call JIT stops dominating.
 That is where the GPU path is meant to be used.
 
+## Python
+
+`trajrun-py` (maturin/pyo3) exposes the same engine:
+
+```python
+import trajrun
+out, status = trajrun.run(src, data, threads=8)   # -> (bytes, "speculative ...")
+info = trajrun.check(src, data)                   # verdict without running
+```
+
+`pip install .` in `trajrun-py/`, see `../trajrun-py/README.md`.
+
 ## Measured (M1, wall-clock incl. file I/O)
 
 | example | input | serial | CPU 8T | GPU | merge dist. |
