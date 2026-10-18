@@ -1,0 +1,47 @@
+name: CI
+on: [push, pull_request]
+
+jobs:
+  rust:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: trajrun
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+      - run: cargo test
+      - run: cargo build --release
+      - name: CPU smoke (speculative)
+        run: |
+          python3 -c "open('in.bin','wb').write(bytes((i*2654435761)&0xFF for i in range(1<<22)))"
+          ./target/release/trajrun examples/fsm.c in.bin out.bin --cpu 4
+      - name: CPU smoke (affine scan)
+        run: ./target/release/trajrun examples/lcg.c in.bin out_lcg.bin --cpu 4
+      - name: GPU smoke (Metal)
+        if: runner.os == 'macOS'
+        run: ./target/release/trajrun examples/fsm.c in.bin out_gpu.bin --gpu --verify
+
+  python:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install maturin
+      - run: maturin build --release
+        working-directory: trajrun-py
+      - run: |
+          pip install trajrun-py/target/wheels/trajrun-*.whl
+          python trajrun-py/test_trajrun.py

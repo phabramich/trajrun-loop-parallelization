@@ -21,8 +21,8 @@
 //!       path falls back to the (serial) CPU run instead of failing.
 //! shortcut: x/y element width is 1 or 4 bytes; i64/f64 state unsupported.
 
-use trajrun::*;
 use std::{env, fs, time::Instant};
+use trajrun::*;
 
 fn usage() -> ! {
     eprintln!(
@@ -38,8 +38,12 @@ fn usage() -> ! {
 /// "in.bin out.bin" lines on stdin and answers "ok <status> <ms>" per job.
 /// The dylib / Metal kernels are built once — this is where the GPU path
 /// actually wins, since per-call JIT+I/O stop dominating.
-fn serve_loop(spec: &Spec, threads: usize, gpu_flag: bool,
-             verify: Option<bool>) -> Result<(), String> {
+fn serve_loop(
+    spec: &Spec,
+    threads: usize,
+    gpu_flag: bool,
+    verify: Option<bool>,
+) -> Result<(), String> {
     use std::io::{BufRead, Write};
     let d = build_dylib(spec)?;
     #[cfg(target_os = "macos")]
@@ -68,22 +72,31 @@ fn serve_loop(spec: &Spec, threads: usize, gpu_flag: bool,
                     eng = Some((n, gpu::Engine::new(spec, n, 8192)?));
                 }
                 let mut out = Vec::new();
-                match eng.as_ref().unwrap().1.run(spec, &bytes, &mut out, 64,
-                                                  aff.as_ref().unwrap().as_ref()) {
+                match eng.as_ref().unwrap().1.run(
+                    spec,
+                    &bytes,
+                    &mut out,
+                    64,
+                    aff.as_ref().unwrap().as_ref(),
+                ) {
                     Ok(r) => {
                         out.truncate(want);
                         fs::write(outp, &out).map_err(|e| format!("{outp}: {e}"))?;
-                        return Ok(format!("gpu {r} rounds {:.1}ms",
-                                          t0.elapsed().as_secs_f64() * 1e3));
+                        return Ok(format!(
+                            "gpu {r} rounds {:.1}ms",
+                            t0.elapsed().as_secs_f64() * 1e3
+                        ));
                     }
                     Err(e) => eprintln!("gpu: {e} — cpu fallback"),
                 }
             }
             let _ = gpu_flag;
-            let (out, st) = run_cpu(&d, spec, &bytes, threads,
-                                    verify.unwrap_or(false))?;
+            let (out, st) = run_cpu(&d, spec, &bytes, threads, verify.unwrap_or(false))?;
             fs::write(outp, &out).map_err(|e| format!("{outp}: {e}"))?;
-            Ok(format!("cpu {st} {:.1}ms", t0.elapsed().as_secs_f64() * 1e3))
+            Ok(format!(
+                "cpu {st} {:.1}ms",
+                t0.elapsed().as_secs_f64() * 1e3
+            ))
         };
         let msg = match job() {
             Ok(m) => format!("ok {m}"),
@@ -101,7 +114,6 @@ fn main() -> Result<(), String> {
         usage();
     }
     let mut gpu = false;
-    let mut cpu = false;
     let mut check = false;
     let mut serve = false;
     let mut verify: Option<bool> = None;
@@ -113,7 +125,6 @@ fn main() -> Result<(), String> {
         match args[i].as_str() {
             "--gpu" => gpu = true,
             "--cpu" => {
-                cpu = true;
                 if let Some(n) = args.get(i + 1).and_then(|s| s.parse().ok()) {
                     threads = n;
                     i += 1;
@@ -135,9 +146,6 @@ fn main() -> Result<(), String> {
         }
         i += 1;
     }
-    if !cpu && !gpu {
-        cpu = true;
-    }
     let step_path = pos.first().ok_or_else(|| "missing step.c".to_string())?;
     let src = fs::read_to_string(step_path).map_err(|e| format!("{step_path}: {e}"))?;
     let spec = parse_spec(&src).map_err(|e| format!("{step_path}: {e}"))?;
@@ -145,7 +153,11 @@ fn main() -> Result<(), String> {
         "trajrun: S={} nf={} [{}], x={}, y={}",
         spec.sname,
         spec.fields.len(),
-        spec.fields.iter().map(|f| f.0.as_str()).collect::<Vec<_>>().join(","),
+        spec.fields
+            .iter()
+            .map(|f| f.0.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
         spec.x.c(),
         spec.y.c()
     );
@@ -159,7 +171,11 @@ fn main() -> Result<(), String> {
             } else {
                 ""
             };
-            eprintln!("check: compile ok; {}{}", probe_merge(&d, &spec, &bytes), aff);
+            eprintln!(
+                "check: compile ok; {}{}",
+                probe_merge(&d, &spec, &bytes),
+                aff
+            );
         } else {
             eprintln!("check: compile ok (no input given — skipped probe)");
         }
@@ -185,7 +201,10 @@ fn main() -> Result<(), String> {
             .and_then(|e| e.run(&spec, &bytes, &mut out, 64, aff.as_ref()))
         {
             Ok(rounds) => {
-                eprintln!("gpu: {rounds} rounds, {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
+                eprintln!(
+                    "gpu: {rounds} rounds, {:.1} ms",
+                    t0.elapsed().as_secs_f64() * 1e3
+                );
                 out.truncate(want_len);
                 fs::write(outp, &out).map_err(|e| format!("{outp}: {e}"))?;
                 if verify.unwrap_or(false) {
@@ -213,8 +232,16 @@ fn main() -> Result<(), String> {
     let d = build_dylib(&spec)?;
     let t0 = Instant::now();
     let (out, st) = run_cpu(&d, &spec, &bytes, threads, verify.unwrap_or(true))?;
-    eprintln!("cpu: {} — {:.1} ms{}", st, t0.elapsed().as_secs_f64() * 1e3,
-        if verify.unwrap_or(true) && st.starts_with("spec") { " (verified bit-exact)" } else { "" });
+    eprintln!(
+        "cpu: {} — {:.1} ms{}",
+        st,
+        t0.elapsed().as_secs_f64() * 1e3,
+        if verify.unwrap_or(true) && st.starts_with("spec") {
+            " (verified bit-exact)"
+        } else {
+            ""
+        }
+    );
     fs::write(outp, &out).map_err(|e| format!("{outp}: {e}"))?;
     Ok(())
 }

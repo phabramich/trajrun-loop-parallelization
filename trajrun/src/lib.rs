@@ -57,8 +57,8 @@ impl Ty {
 }
 
 pub struct Spec {
-    pub src: String,                  // user source, comments stripped
-    pub sname: String,                // state struct name
+    pub src: String,                    // user source, comments stripped
+    pub sname: String,                  // state struct name
     pub fields: Vec<(String, Ty, u32)>, // (name, type, init bits)
     pub x: Ty,
     pub y: Ty,
@@ -161,8 +161,8 @@ pub fn parse_spec(src: &str) -> Result<Spec, String> {
             .find("step")
             .map(|o| p + o)
             .ok_or("need a `step` function")?;
-        let prev_ok = q == 0
-            || !s.as_bytes()[q - 1].is_ascii_alphanumeric() && s.as_bytes()[q - 1] != b'_';
+        let prev_ok =
+            q == 0 || !s.as_bytes()[q - 1].is_ascii_alphanumeric() && s.as_bytes()[q - 1] != b'_';
         let open = s[q + 4..]
             .find(|c: char| !c.is_whitespace())
             .map(|o| q + 4 + o);
@@ -282,10 +282,9 @@ pub fn build_dylib(spec: &Spec) -> Result<Dylib, String> {
     let srcp = dir.join("step_all.cc");
     let libp = dir.join("step_all.dylib");
     fs::write(&srcp, shim_src(spec)).map_err(|e| e.to_string())?;
-    let out = Command::new("cc")
+    // c++ driver (not cc -x c++) so the right C++ runtime is linked on every OS
+    let out = Command::new("c++")
         .args([
-            "-x",
-            "c++",
             "-std=c++17",
             "-O2",
             "-fPIC",
@@ -298,7 +297,10 @@ pub fn build_dylib(spec: &Spec) -> Result<Dylib, String> {
         .output()
         .map_err(|e| format!("cc failed to start: {e} (need Xcode CLT for --cpu)"))?;
     if !out.status.success() {
-        return Err(format!("cc failed:\n{}", String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "cc failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
     unsafe {
         let lib = libloading::Library::new(&libp).map_err(|e| e.to_string())?;
@@ -311,7 +313,12 @@ pub fn build_dylib(spec: &Spec) -> Result<Dylib, String> {
         let run = *lib.get::<RunFn>(b"traj_run").map_err(|e| e.to_string())?;
         let mut init = [0u32; 16];
         initf(init.as_mut_ptr());
-        Ok(Dylib { _lib: lib, step, run, init })
+        Ok(Dylib {
+            _lib: lib,
+            step,
+            run,
+            init,
+        })
     }
 }
 
@@ -340,8 +347,14 @@ pub fn serial_run(d: &Dylib, spec: &Spec, bytes: &[u8]) -> Vec<u8> {
     let mut ys = vec![0u8; n * spec.y.sz()];
     let mut s = d.init;
     unsafe {
-        (d.run)(s.as_mut_ptr(), bytes.as_ptr(), ys.as_mut_ptr(), n as u64,
-                std::ptr::null_mut(), 0);
+        (d.run)(
+            s.as_mut_ptr(),
+            bytes.as_ptr(),
+            ys.as_mut_ptr(),
+            n as u64,
+            std::ptr::null_mut(),
+            0,
+        );
     }
     ys
 }
@@ -410,7 +423,11 @@ pub fn detect_affine(d: &Dylib, spec: &Spec, bytes: &[u8]) -> Option<Mat> {
     let zero = [0u32; 16];
     // columns of A from unit basis states; must be identical for all x
     for i in 0..8 {
-        let x = if n == 0 { 0 } else { xbits(bytes, i * n / 8, xsz) };
+        let x = if n == 0 {
+            0
+        } else {
+            xbits(bytes, i * n / 8, xsz)
+        };
         let mut v0 = zero;
         st(&mut v0, x);
         let mut cols = vec![vec![0u32; nf]; nf]; // cols[j][field]
@@ -442,7 +459,11 @@ pub fn detect_affine(d: &Dylib, spec: &Spec, bytes: &[u8]) -> Option<Mat> {
         rng
     };
     for i in 0..16 {
-        let x = if n == 0 { 0 } else { xbits(bytes, (nrng() as usize) % n, xsz) };
+        let x = if n == 0 {
+            0
+        } else {
+            xbits(bytes, (nrng() as usize) % n, xsz)
+        };
         let _ = i;
         let mut v0 = zero;
         st(&mut v0, x);
@@ -465,8 +486,14 @@ pub fn detect_affine(d: &Dylib, spec: &Spec, bytes: &[u8]) -> Option<Mat> {
 /// Exact parallel run for affine steps: two native passes, no fixup —
 /// pass 1 gets each chunk's constant term, a serial scan of `nch`
 /// boundaries recovers every true start state, pass 2 emits outputs.
-pub fn run_affine(d: &Dylib, spec: &Spec, bytes: &[u8], threads: usize,
-               verify: bool, a: &Mat) -> Result<(Vec<u8>, String), String> {
+pub fn run_affine(
+    d: &Dylib,
+    spec: &Spec,
+    bytes: &[u8],
+    threads: usize,
+    verify: bool,
+    a: &Mat,
+) -> Result<(Vec<u8>, String), String> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let (xsz, ysz, nf) = (spec.x.sz(), spec.y.sz(), spec.fields.len());
     let n = bytes.len() / xsz;
@@ -497,17 +524,32 @@ pub fn run_affine(d: &Dylib, spec: &Spec, bytes: &[u8], threads: usize,
                     let clen = len.min(n - c * len);
                     let mut s = unsafe { *(sp as *const [u32; 16]).add(c) };
                     unsafe {
-                        (d.run)(s.as_mut_ptr(), (bp + c * len * xsz) as *const u8,
-                                yp[c] as *mut u8, clen as u64,
-                                std::ptr::null_mut(), 0);
+                        (d.run)(
+                            s.as_mut_ptr(),
+                            (bp + c * len * xsz) as *const u8,
+                            yp[c] as *mut u8,
+                            clen as u64,
+                            std::ptr::null_mut(),
+                            0,
+                        );
                         *(ep as *mut [u32; 16]).add(c) = s;
                     }
                 });
             }
         });
     };
-    pass(&vec![{ let mut v = [0u32; 16]; v[..nf].copy_from_slice(&init); v }; nch],
-         &mut ends, &mut ys);
+    pass(
+        &vec![
+            {
+                let mut v = [0u32; 16];
+                v[..nf].copy_from_slice(&init);
+                v
+            };
+            nch
+        ],
+        &mut ends,
+        &mut ys,
+    );
     // B_c = ends[c] - A^L·init; s*_{c+1} = A^L·s*_c + B_c
     let mut s = init.clone();
     for c in 0..nch - 1 {
@@ -532,8 +574,13 @@ pub fn run_affine(d: &Dylib, spec: &Spec, bytes: &[u8], threads: usize,
 /// but phase 1 calls the batch `traj_run` once per chunk (native loop
 /// speed); only the sequential fix-up pays the per-element FFI call, and
 /// only for merge distances.
-pub fn run_cpu(d: &Dylib, spec: &Spec, bytes: &[u8], threads: usize, verify: bool)
-        -> Result<(Vec<u8>, String), String> {
+pub fn run_cpu(
+    d: &Dylib,
+    spec: &Spec,
+    bytes: &[u8],
+    threads: usize,
+    verify: bool,
+) -> Result<(Vec<u8>, String), String> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let (xsz, ysz, nf) = (spec.x.sz(), spec.y.sz(), spec.fields.len());
     if bytes.len() % xsz != 0 {
@@ -553,8 +600,14 @@ pub fn run_cpu(d: &Dylib, spec: &Spec, bytes: &[u8], threads: usize, verify: boo
         let mut a = d.init;
         let mut scratch = vec![0u8; p * ysz];
         unsafe {
-            (d.run)(a.as_mut_ptr(), bytes.as_ptr(), scratch.as_mut_ptr(),
-                    p as u64, std::ptr::null_mut(), 0);
+            (d.run)(
+                a.as_mut_ptr(),
+                bytes.as_ptr(),
+                scratch.as_mut_ptr(),
+                p as u64,
+                std::ptr::null_mut(),
+                0,
+            );
         }
         let mut b = d.init;
         let off = n / 2;
@@ -573,7 +626,11 @@ pub fn run_cpu(d: &Dylib, spec: &Spec, bytes: &[u8], threads: usize, verify: boo
             return run_affine(d, spec, bytes, threads, verify, &a);
         }
         let ys = serial_run(d, spec, bytes);
-        let m = if threads <= 1 || p == 0 { "serial" } else { "serial(wall)" };
+        let m = if threads <= 1 || p == 0 {
+            "serial"
+        } else {
+            "serial(wall)"
+        };
         return Ok((ys, m.into()));
     }
 
@@ -604,9 +661,14 @@ pub fn run_cpu(d: &Dylib, spec: &Spec, bytes: &[u8], threads: usize, verify: boo
                     let clen = len.min(n - c * len);
                     let mut s = d.init;
                     unsafe {
-                        (d.run)(s.as_mut_ptr(), (bp + c * len * xsz) as *const u8,
-                                yp[c] as *mut u8, clen as u64,
-                                cp[c] as *mut u32, m as u64);
+                        (d.run)(
+                            s.as_mut_ptr(),
+                            (bp + c * len * xsz) as *const u8,
+                            yp[c] as *mut u8,
+                            clen as u64,
+                            cp[c] as *mut u32,
+                            m as u64,
+                        );
                         *(ep as *mut [u32; 16]).add(c) = s;
                     }
                 });
@@ -628,9 +690,7 @@ pub fn run_cpu(d: &Dylib, spec: &Spec, bytes: &[u8], threads: usize, verify: boo
             let y = f(&mut s, xbits(bytes, c * len + j, xsz));
             yput(&mut ys, c * len + j, y, ysz);
             fix += 1;
-            if (j + 1) % m == 0
-                && s[..nf] == cks[c][((j + 1) / m - 1) * nf..((j + 1) / m) * nf]
-            {
+            if (j + 1) % m == 0 && s[..nf] == cks[c][((j + 1) / m - 1) * nf..((j + 1) / m) * nf] {
                 hit = true;
                 break;
             }
@@ -647,7 +707,10 @@ pub fn run_cpu(d: &Dylib, spec: &Spec, bytes: &[u8], threads: usize, verify: boo
             return Err("parallel output != serial — BUG".into());
         }
     }
-    Ok((ys, format!("speculative chunks={nch} merged={merged} reruns={full} fix={fix}")))
+    Ok((
+        ys,
+        format!("speculative chunks={nch} merged={merged} reruns={full} fix={fix}"),
+    ))
 }
 
 // ------------------------------------------------------------- GPU path --
@@ -684,10 +747,18 @@ pub fn msl_src(spec: &Spec, l: usize, m: usize, c: usize) -> String {
     u2.push_str(&user[last..]);
     user = u2;
     for (a, b) in [
-        ("fabsf", "fabs"), ("fminf", "fmin"), ("fmaxf", "fmax"),
-        ("sqrtf", "sqrt"), ("expf", "exp"), ("logf", "log"),
-        ("powf", "pow"), ("sinf", "sin"), ("cosf", "cos"),
-        ("floorf", "floor"), ("roundf", "round"), ("fmaf", "fma"),
+        ("fabsf", "fabs"),
+        ("fminf", "fmin"),
+        ("fmaxf", "fmax"),
+        ("sqrtf", "sqrt"),
+        ("expf", "exp"),
+        ("logf", "log"),
+        ("powf", "pow"),
+        ("sinf", "sin"),
+        ("cosf", "cos"),
+        ("floorf", "floor"),
+        ("roundf", "round"),
+        ("fmaf", "fma"),
     ] {
         user = user.replace(&format!("{a}("), &format!("{b}("));
     }
@@ -819,10 +890,8 @@ pub mod gpu {
                 .new_library_with_source(&src, &opts)
                 .map_err(|e| format!("metal compile: {e}"))?;
             let get = |name: &str| {
-                dev.new_compute_pipeline_state_with_function(
-                    &lib.get_function(name, None).unwrap(),
-                )
-                .unwrap()
+                dev.new_compute_pipeline_state_with_function(&lib.get_function(name, None).unwrap())
+                    .unwrap()
             };
             Ok(Engine {
                 q: dev.new_command_queue(),
@@ -853,16 +922,17 @@ pub mod gpu {
                 e.set_buffer(i as u64, Some(*b), 0);
             }
             let tg = thr.min(256);
-            e.dispatch_threads(MTLSize::new(thr as u64, 1, 1), MTLSize::new(tg as u64, 1, 1));
+            e.dispatch_threads(
+                MTLSize::new(thr as u64, 1, 1),
+                MTLSize::new(tg as u64, 1, 1),
+            );
             e.end_encoding();
             cb.commit();
             cb.wait_until_completed();
         }
 
         fn w32(b: &Buffer, v: &[u32]) {
-            unsafe {
-                std::ptr::copy_nonoverlapping(v.as_ptr(), b.contents() as *mut u32, v.len())
-            }
+            unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), b.contents() as *mut u32, v.len()) }
         }
         fn r32(b: &Buffer, n: usize) -> Vec<u32> {
             unsafe { std::slice::from_raw_parts(b.contents() as *const u32, n).to_vec() }
@@ -872,8 +942,14 @@ pub mod gpu {
         /// `aff`: optional Z/2^32-affine matrix of the step — lets us inject
         /// exact boundary states after the first round (one extra round
         /// confirms the fixpoint instead of merging).
-        pub fn run(&self, spec: &Spec, xs_bytes: &[u8], ys_bytes: &mut Vec<u8>,
-                   max_rounds: usize, aff: Option<&super::Mat>) -> Result<usize, String> {
+        pub fn run(
+            &self,
+            spec: &Spec,
+            xs_bytes: &[u8],
+            ys_bytes: &mut Vec<u8>,
+            max_rounds: usize,
+            aff: Option<&super::Mat>,
+        ) -> Result<usize, String> {
             let (c, l, m, nf) = (self.c, self.l, self.m, self.nf);
             let nck = l / m;
             let (xsz, ysz) = (spec.x.sz(), spec.y.sz());
@@ -893,11 +969,18 @@ pub mod gpu {
             unsafe {
                 let d = xs.contents() as *mut u8;
                 d.copy_from_nonoverlapping(xs_bytes.as_ptr(), xs_bytes.len());
-                d.add(xs_bytes.len()).write_bytes(0, c * l * xsz - xs_bytes.len());
+                d.add(xs_bytes.len())
+                    .write_bytes(0, c * l * xsz - xs_bytes.len());
             }
             self.enc(&self.k_in, &[&xs, &xs_il], c * l);
             Self::w32(&params, &[0]);
-            self.enc(&self.k_step, &[&xs_il, &ys, &params, &s_in, &s_prev, &ck_in, &s_out, &ck, &mq], c);
+            self.enc(
+                &self.k_step,
+                &[
+                    &xs_il, &ys, &params, &s_in, &s_prev, &ck_in, &s_out, &ck, &mq,
+                ],
+                c,
+            );
             let mut e = Self::r32(&s_out, nf * c);
             let mut s_used: Vec<u32> = self
                 .init
@@ -917,8 +1000,7 @@ pub mod gpu {
                     }
                     let av = super::matvec(&al, &s);
                     for f2 in 0..nf {
-                        s[f2] = av[f2]
-                            .wrapping_add(e[f2 * c + cc].wrapping_sub(init_al[f2]));
+                        s[f2] = av[f2].wrapping_add(e[f2 * c + cc].wrapping_sub(init_al[f2]));
                     }
                 }
                 out
@@ -945,7 +1027,11 @@ pub mod gpu {
                 Self::w32(&params, &[1]);
                 let td = std::env::var("TRAJ_DEBUG").is_ok();
                 let tt = Instant::now();
-                self.enc(&self.k_step, &[&xs_il, &y2, &params, &s_in, &s_prev, &ck, &s_out, &ck2, &mq], c);
+                self.enc(
+                    &self.k_step,
+                    &[&xs_il, &y2, &params, &s_in, &s_prev, &ck, &s_out, &ck2, &mq],
+                    c,
+                );
                 let t_step = tt.elapsed();
                 let tt = Instant::now();
                 let mqv = Self::r32(&mq, c);
@@ -999,13 +1085,26 @@ pub mod gpu {
                 cb.wait_until_completed();
                 let t_splice = tt.elapsed();
                 if td {
-                    eprintln!("    step={:.1}ms splice={:.1}ms", t_step.as_secs_f64()*1e3, t_splice.as_secs_f64()*1e3);
+                    eprintln!(
+                        "    step={:.1}ms splice={:.1}ms",
+                        t_step.as_secs_f64() * 1e3,
+                        t_splice.as_secs_f64() * 1e3
+                    );
                 }
                 if std::env::var("TRAJ_DEBUG").is_ok() {
                     let (sk, mg, fr) = mqv.iter().fold((0, 0, 0), |(s, m2, f), &q| {
-                        if q == 0 { (s + 1, m2, f) } else if (q as usize) < l { (s, m2 + 1, f) } else { (s, m2, f + 1) }
+                        if q == 0 {
+                            (s + 1, m2, f)
+                        } else if (q as usize) < l {
+                            (s, m2 + 1, f)
+                        } else {
+                            (s, m2, f + 1)
+                        }
                     });
-                    eprintln!("  round {rounds}: skip={sk} merged={mg} full={fr} moved={}", e2 != e);
+                    eprintln!(
+                        "  round {rounds}: skip={sk} merged={mg} full={fr} moved={}",
+                        e2 != e
+                    );
                 }
                 let conv = e2 == e;
                 e = e2;
@@ -1025,7 +1124,11 @@ pub mod gpu {
                 ys_bytes.clear();
                 ys_bytes.reserve(need);
                 ys_bytes.set_len(need);
-                std::ptr::copy_nonoverlapping(y2.contents() as *const u8, ys_bytes.as_mut_ptr(), need);
+                std::ptr::copy_nonoverlapping(
+                    y2.contents() as *const u8,
+                    ys_bytes.as_mut_ptr(),
+                    need,
+                );
             }
             Ok(rounds)
         }
@@ -1043,8 +1146,14 @@ pub fn probe_merge(d: &Dylib, spec: &Spec, bytes: &[u8]) -> String {
     let mut a = d.init;
     let mut scratch = vec![0u8; p * ysz];
     unsafe {
-        (d.run)(a.as_mut_ptr(), bytes.as_ptr(), scratch.as_mut_ptr(), p as u64,
-                std::ptr::null_mut(), 0);
+        (d.run)(
+            a.as_mut_ptr(),
+            bytes.as_ptr(),
+            scratch.as_mut_ptr(),
+            p as u64,
+            std::ptr::null_mut(),
+            0,
+        );
     }
     let mut b = d.init;
     let off = n / 2;
