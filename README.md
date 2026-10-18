@@ -24,6 +24,10 @@ validation **4.1×**, FM-receiver IQ chain **5.8×**, EWMA risk filter
 **4.9×** on 8 CPU threads — all bit-exact. GPU wins on repeated calls or
 GPU-resident data. See `trajrun/README.md`.
 
+Also: `trajrun-py/` — pyo3/maturin Python binding
+(`trajrun.run(src, bytes) -> (bytes, status)`), and
+`.github/workflows/ci.yml` — fmt + tests + CPU/GPU smoke on Linux & macOS.
+
 Prior art: this generalizes the FSM-speculation line (Mytkowicz'14,
 GSpecPal'22, ParPaRaw/cuDF'20 — all enumerable-state) to **opaque state**
 where merges can only be detected empirically. Map: `PRIOR_ART.md`.

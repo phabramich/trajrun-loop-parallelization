@@ -236,3 +236,12 @@ fix: added math.h to CPU prelude (sqrtf etc. now usable in step.c)
 ndjson 1GiB record bounds : serial 1570ms / 8T 574ms (2.7x) / GPU 5072ms (5 rounds); merge ~212 steps; GPU bit-exact
 lcg 64MB u8 LCG          : wall -> AFFINE Z/2^32: 8T 227ms (2 exact passes) / GPU 2 rounds; bit-exact
 acc_acc 256MB u32 integ. : affine exact scan, 8T 343ms
+--- distribution (items 4-5) ---
+trajrun split: engine -> src/lib.rs, thin CLI in src/main.rs (pub API:
+parse_spec/build_dylib/probe_merge/detect_affine/run_cpu/gpu::Engine).
+trajrun-py: pyo3 cdylib + maturin, run(src, bytes, threads, gpu) ->
+(bytes, status); check(src, bytes) -> verdict. Input via buffer protocol
+(zero-copy in); output is one bytes copy. Smoke: python test_trajrun.py.
+CI: .github/workflows/ci.yml — fmt+test+smokes on ubuntu+macos, GPU smoke
+macos-only, python wheel build both. metal dep target-gated; c++ driver
+links the right runtime on Linux.
